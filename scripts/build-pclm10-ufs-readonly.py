@@ -313,12 +313,32 @@ def main() -> int:
 
     src_dir = args.source
     if src_dir is None:
-        for candidate in (ROOT / ".cache/pclm10-ShengUfs", ROOT / "drivers/ShengUfs"):
+        candidates = [
+            ROOT / "drivers/ShengUfs",
+            ROOT / ".cache/pclm10-ShengUfs",
+        ]
+        # In format-2 builds, ROOT is out/<board>/<os>/<config>/tree while pre-staged
+        # caches can live under the UniXNU repo root or UNIXNU_DEVICE.
+        if len(ROOT.parents) >= 5:
+            candidates.append(ROOT.parents[4] / ".cache/pclm10-ShengUfs")
+        if os.environ.get("UNIXNU_DEVICE"):
+            candidates.append(Path(os.environ["UNIXNU_DEVICE"]) / ".cache/pclm10-ShengUfs")
+        for candidate in candidates:
             if (candidate / "NativeUfs.cpp").is_file():
                 src_dir = candidate
                 break
         if src_dir is None:
-            raise SystemExit("Missing ShengUfs source under .cache/pclm10-ShengUfs or drivers/ShengUfs")
+            fallback = ROOT / "build/sheng-ufs/upstream"
+            fallback.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(
+                ["git", "clone", "https://github.com/UniXNU/ShengUfs.git", str(fallback)],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(fallback), "checkout", "99d8bcd3e43dd24fc3c8437c67b5d4cc71ab94d0"],
+                check=True,
+            )
+            src_dir = fallback
 
     if args.prepare_only:
         transform_source(src_dir.resolve(), args.prepare_only.resolve())
@@ -348,9 +368,11 @@ def main() -> int:
         elif val == "-o":
             command.extend(["-o", str(obj)])
             i += 1
+        elif val in ("-MF", "-MJ"):
+            i += 1
         elif val == "-Xclang" and i + 1 < len(arguments) and arguments[i + 1].startswith("-W"):
             i += 1
-        elif not val.startswith("-W"):
+        elif not val.startswith("-W") and val not in ("-MD", "-MP"):
             command.append(val)
         i += 1
 

@@ -56,22 +56,28 @@ jobs:
           repository: UniXNU/uefi-sheng
           path: uefi-pclm10
 
-      - name: cache linux toolchain
+      - name: restore linux toolchain cache
         id: cache-tc
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: /opt/unixnu-linux
           key: unixnu-linux-tc-${{ runner.os }}-v1
 
       - name: setup linux toolchain and host tools
         run: |
-          LLVM_CFG=$(command -v llvm-config || true)
           sudo python3 UniXNU/scripts/linux/setup-toolchain.py /opt/unixnu-linux
           sudo chown -R "$(id -u):$(id -g)" /opt/unixnu-linux
           sudo apt-get install -y lld llvm uuid-dev
           for t in clang lld-link llvm-lib llvm-rc llvm-nm llvm-objcopy dtc fdtget fdtput make mformat mcopy python3; do
             command -v "$t" >/dev/null || { echo "missing tool: $t"; exit 1; }
           done
+
+      - name: save linux toolchain cache
+        if: steps.cache-tc.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /opt/unixnu-linux
+          key: unixnu-linux-tc-${{ runner.os }}-v1
 
       - name: prepare uefi-pclm10
         run: |
