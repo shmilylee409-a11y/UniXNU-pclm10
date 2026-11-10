@@ -1,0 +1,105 @@
+name: package-linux
+
+# Cross-compile kernel, payload, UEFI firmware, and boot.img on ubuntu-latest
+# using UniXNU/scripts/linux/setup-toolchain.py. Zero macOS runner queue wait;
+# caches /opt/unixnu-linux so subsequent runs finish in minutes.
+
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: "OS profile of the images"
+        type: choice
+        options: ["17", "26", "27"]
+        default: "17"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: checkout device
+        uses: actions/checkout@v4
+        with:
+          path: device
+          submodules: recursive
+
+      - name: checkout UniXNU
+        uses: actions/checkout@v4
+        with:
+          repository: UniXNU/UniXNU
+          ref: 95ad78129203442c3c14c02336303adbddf8d0a3
+          path: UniXNU
+
+      - name: init UniXNU submodules safely
+        working-directory: UniXNU
+        run: |
+          git submodule sync
+          for sub in $(git config --file .gitmodules --get-regexp path | awk '{print $2}'); do
+            echo "Initializing submodule $sub..."
+            git submodule update --init --recursive "$sub" || {
+              echo "Retrying $sub tracking remote main..."
+              git submodule update --init --remote "$sub" || true
+            }
+          done
+
+      - name: checkout uefi-sheng
+        uses: actions/checkout@v4
+        with:
+          repository: UniXNU/uefi-sheng
+          path: uefi-pclm10
+
+      - name: cache linux toolchain
+        id: cache-tc
+        uses: actions/cache@v4
+        with:
+          path: /opt/unixnu-linux
+          key: unixnu-linux-tc-${{ runner.os }}-v1
+
+      - name: setup linux toolchain and host tools
+        run: |
+          LLVM_CFG=$(command -v llvm-config || true)
+          sudo python3 UniXNU/scripts/linux/setup-toolchain.py /opt/unixnu-linux
+          sudo chown -R "$(id -u):$(id -g)" /opt/unixnu-linux
+          sudo apt-get install -y lld llvm uuid-dev
+          for t in clang lld-link llvm-lib llvm-rc llvm-nm llvm-objcopy dtc fdtget fdtput make mformat mcopy python3; do
+            command -v "$t" >/dev/null || { echo "missing tool: $t"; exit 1; }
+          done
+
+      - name: prepare uefi-pclm10
+        run: |
+          cp device/scripts/build-pclm10-ufs-readonly.py UniXNU/scripts/
+          mkdir -p UniXNU/.cache
+          rm -rf UniXNU/.cache/pclm10-ShengUfs
+          git clone https://github.com/UniXNU/ShengUfs.git UniXNU/.cache/pclm10-ShengUfs
+          git -C UniXNU/.cache/pclm10-ShengUfs checkout 99d8bcd3e43dd24fc3c8437c67b5d4cc71ab94d0
+          python3 device/scripts/prepare-pclm10-uefi.py \
+            --uefi uefi-pclm10 \
+            --device device \
+            --tree UniXNU
+
+      - name: package
+        working-directory: device
+        env:
+          UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID || '19081001' }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/package.sh --os "${{ inputs.os }}" --uefi ../uefi-pclm10
+
+      - name: images
+        uses: actions/upload-artifact@v4
+        with:
+          name: images-pclm10-${{ inputs.os }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            UniXNU/out/pclm10/*/*/boot/boot.img
+            UniXNU/out/pclm10/*/*/payload/payload.img
+            UniXNU/out/pclm10/*/*/kernel/kernel.macho
+            UniXNU/out/pclm10/*/*/package.manifest.json
