@@ -28,9 +28,9 @@ config_fragments = [
 ]
 patch_series = [
   "arch:patches/xnu/series",
+  "device:patches/xnu/series",
   "soc:patches/xnu/series",
   "os:patches/xnu/series",
-  "device:patches/xnu/series",
 ]
 archives = [
   "build-corecrypto-14.py",
