@@ -254,6 +254,25 @@ static int pon_mark_bootloader(uint8_t *out_subtype, uint8_t *out_before,
 }
 
 int boot_reset_bootloader(char *text, unsigned cap);
+void boot_progress_persist(const char *line, uint32_t color);
+
+char pclm10_usb_persist_line[384];
+uint32_t pclm10_usb_persist_color;
+
+void boot_progress_persist(const char *line, uint32_t color)
+{
+	pclm10_usb_persist_color = color;
+	if (!line) {
+		pclm10_usb_persist_line[0] = '\0';
+		return;
+	}
+	unsigned i = 0;
+	while (line[i] && i + 1u < sizeof(pclm10_usb_persist_line)) {
+		pclm10_usb_persist_line[i] = line[i];
+		++i;
+	}
+	pclm10_usb_persist_line[i] = '\0';
+}
 
 int boot_reset_bootloader(char *text, unsigned cap)
 {
