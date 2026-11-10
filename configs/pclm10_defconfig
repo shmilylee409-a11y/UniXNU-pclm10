@@ -1,5 +1,24 @@
-# Board kernel configuration for OPPO Reno Ace (PCLM10, project 19081, SM8150-AC).
-# Architecture, SoC, and OS fragments in board.toml are merged ahead of this file;
-# only board-specific overrides belong here.
-CONFIG_BOARD_PCLM10=y
-CONFIG_SOC_SM8150=y
+# OPPO Reno Ace (PCLM10 / Project 19081) - Snapdragon 855+ (SM8150-AC)
+# First-boot framebuffer console + mockfs bring-up configuration.
+
+# SimpleFB / GOP Framebuffer (1080x2400 @ 0x9d000000, 36 MiB cont_splash_region)
+CONFIG_XNU_FB_PHYS_BASE=0x9d000000
+CONFIG_XNU_FB_PHYS_SIZE=0x2400000
+CONFIG_XNU_FB_WIDTH=1080
+CONFIG_XNU_FB_HEIGHT=2400
+CONFIG_XNU_FB_ROWBYTES=4320
+CONFIG_XNU_FB_DEPTH=32
+CONFIG_XNU_FB_ROTATION=0
+CONFIG_XNU_NATIVE_GOP_FRAMEBUFFER=y
+
+# Critical Qualcomm SoC fix: avoid mapping BCM2837's hardcoded 0x3c0fc000
+# panic region in _PE_create_console() before VBAR_EL1 is installed.
+CONFIG_XNU_DT_PANIC_REGION=y
+
+# Keep GPU and storage block kexts disabled for Stage 1 cloud bring-up
+# (Adreno740 is SM8550-only; storage block kexts require board storage ABI bindings).
+# CONFIG_XNU_NATIVE_ADRENO is not set
+# CONFIG_XNU_NATIVE_UFS is not set
+# CONFIG_XNU_NATIVE_RAM_BLOCK is not set
+# CONFIG_XNU_NATIVE_VIRTIO_BLOCK is not set
+# CONFIG_XNU_SYNTHETIC_ROOT_BLOCK is not set

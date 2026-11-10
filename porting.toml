@@ -46,22 +46,23 @@ evidence = [
 
 [[area]]
 id = "firmware"
-status = "planned"
+status = "implemented"
 components = ["DarwinBoot"]
-paths = ["proprietary-files.txt", "scripts/extract-files.py", "scripts/gen-touch-firmware.py"]
+paths = ["proprietary-files.txt", "scripts/extract-files.py", "scripts/gen-touch-firmware.py", "scripts/prepare-pclm10-uefi.py", "dts/oppo-pclm10-19081.dtb"]
 inputs = [
-    "Project-Aloha / Silicium EDK2 UEFI firmware for oppo-pclm10 (Platforms/SurfaceDuo1Pkg/Device/oppo-pclm10).",
-    "UEFI FD loaded at 0x9fc00000 (size 0x00300000), FV region at 0x9f800000 (size 0x00400000), SEC heap/vectors/page tables at 0x9ff00000..0xa0000000, DXE heap at 0xc0000000 (size 0x03500000).",
+    "Project-Aloha / Silicium EDK2 UEFI firmware for oppo-pclm10 (Platforms/SurfaceDuo1Pkg/Device/oppo-pclm10) and UniXNU/uefi-sheng.",
+    "Extracted single DTB dts/oppo-pclm10-19081.dtb (486447 bytes, oppo,prjversion = <1 19081>) containing /reserved-memory/cont_splash_region at 0x9d000000 (size 0x02400000).",
+    "UEFI FD loaded at 0x9fc00000 (size 0x00300000), FV region at 0x9f800000 (size 0x00400000), SEC heap/page tables/stack at 0x9ff00000..0xa0000000, DXE heap at 0xa5800000 (size 0x1a800000).",
 ]
 configuration = [
-    "board.toml [firmware] selects config = 'pclm10', dsc = 'Platforms/OPPO/pclm10Pkg/pclm10.dsc', and DEVICE_MODEL = 'pclm10'.",
-    "board.toml [[bootimg.dtb_node]] injects /reserved-memory/cont_splash_region at 0x9d000000 (size 0x02400000) so ABL preserves the GOP scanout region.",
+    "board.toml [firmware] selects config = 'pclm10', dsc = 'Platforms/OPPO/pclm10Pkg/pclm10.dsc', preflight = ['scripts/prepare-pclm10-uefi.py'], and [bootimg] dtb = 'build/pclm10/pclm10.dtb'.",
+    "scripts/prepare-pclm10-uefi.py injects Resources/Configs/pclm10.toml and Platforms/OPPO/pclm10Pkg/ into the UniXNU/uefi-sheng checkout and stages dts/oppo-pclm10-19081.dtb to build/pclm10/pclm10.dtb.",
 ]
 procedure = [
-    "Build UEFI firmware with DarwinBoot integrated, pack into Android boot.img, and boot via fastboot boot boot.img or flash to boot_a/boot_b.",
+    "Run scripts/prepare-pclm10-uefi.py --uefi ../uefi-pclm10 --device . --tree ../UniXNU, then build UEFI firmware with DarwinBoot integrated and pack into Android boot.img.",
 ]
 findings = [
-    "Project-Aloha oppo-pclm10 uefiplat.cfg and PlatformMemoryMapLib.c confirm Display Reserved at 0x9d000000 (0x02400000) and UEFI FD at 0x9fc00000 (0x00300000).",
+    "dts/oppo-pclm10-19081.dtb already defines /reserved-memory/cont_splash_region (0x9d000000, 0x02400000), qseecom_region (0xa0000000, 0x01400000), and cdsp_sec_regions (0xa4c00000, 0x00c00000), so placing DXE Heap at 0xa5800000 (424 MiB) avoids all Bank 0 carveouts.",
 ]
 completion = [
     "Firmware image builds, enters UniXNU via DarwinBoot, publishes the 1080x2400 framebuffer, and preserves documented memory reservations.",
@@ -70,10 +71,12 @@ limits = [
     "On-device fastboot boot verification of the DarwinBoot handoff is pending.",
 ]
 next_action = [
-    "Build the UEFI FD with DarwinBoot and verify handoff into XNU on PCLM10 hardware.",
+    "Trigger the GitHub Actions package workflow to build boot.img and payload.img and test fastboot boot on PCLM10 hardware.",
 ]
 evidence = [
-    { kind = "source", reference = "board.toml", result = "Firmware build recipe and cont_splash_region DTB reservation (0x9d000000, 0x02400000) configured." },
+    { kind = "source", reference = "board.toml", result = "Firmware build recipe, preflight script, and bootimg DTB path configured." },
+    { kind = "source", reference = "scripts/prepare-pclm10-uefi.py", result = "Generates Resources/Configs/pclm10.toml and Platforms/OPPO/pclm10Pkg/ and stages build/pclm10/pclm10.dtb." },
+    { kind = "source", reference = "dts/oppo-pclm10-19081.dtb", result = "Extracted single-board DTB (486447 bytes) for OPPO project 19081 with cont_splash_region@9d000000." },
 ]
 
 [[area]]
@@ -146,7 +149,7 @@ evidence = [
 [[area]]
 id = "storage"
 status = "planned"
-components = ["ShengUfs", "RamBlock", "VirtioMmioBlock", "SoftwareAES", "VerifiedRoot"]
+components = ["SoftwareAES"]
 paths = ["drivers/ShengUfs", "scripts/*ufs*", "scripts/*storage*", "scripts/*userdata*", "scripts/*root*"]
 inputs = [
     "Samsung UFS 3.0 storage (128 GB / 256 GB) on Qualcomm ufshc@1d84000 (MMIO 0x01d84000, size 0x2500), QMP v4 PHY at 0x01d87000, ICE at 0x01d90000, GCC UFS clock window at 0x00177000 (size 0x1000).",

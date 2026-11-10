@@ -1,9 +1,8 @@
 name: package
 
-# Packaging workflow for OPPO Reno Ace (pclm10) (docs/porting/packaging.md).
-# The platform seed comes from the repository secret UNIXNU_UNIQUE_CHIP_ID and is
-# baked into the images, so the run's artifacts belong to one device alone: download
-# them, then delete the run.
+# Cloud packaging workflow for OPPO Reno Ace (PCLM10 / Project 19081).
+# Runs on GitHub Actions macos-26 runner (full Xcode + Homebrew LLVM/LLD/DTC/mtools/ipsw)
+# and produces boot.img, payload.img, kernel.macho, and package.manifest.json.
 
 on:
   workflow_dispatch:
@@ -37,15 +36,13 @@ jobs:
           submodules: recursive
       - uses: actions/checkout@v4
         with:
-          repository: Project-Aloha/mu_aloha_platforms
+          repository: UniXNU/uefi-sheng
           path: uefi-pclm10
-          submodules: recursive
       - name: tools
         run: |
-          brew install dtc llvm lld cmake mtools blacktop/tap/ipsw
-          # Fail fast, naming the tool, before forty minutes of build.
+          brew install dtc llvm lld cmake ninja unifdef mtools blacktop/tap/ipsw
           ok=1
-          for t in clang xcodebuild make git ninja cmake dtc fdtget fdtput aea compression_tool \
+          for t in clang xcodebuild make git ninja cmake unifdef dtc fdtget fdtput aea compression_tool \
                    mformat mcopy ipsw; do
             command -v "$t" >/dev/null || { echo "missing tool: $t"; ok=0; }
           done
@@ -53,25 +50,23 @@ jobs:
             [ -f "/opt/homebrew/opt/llvm/bin/$t" ] || [ -f "/opt/homebrew/opt/lld/bin/$t" ] || { echo "missing tool: $t"; ok=0; }
           done
           [ "$ok" = 1 ]
-      - name: platform seed
-        env:
-          seed: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+      - name: prepare uefi-pclm10
         run: |
-          if ! [[ "$seed" =~ ^[0-9a-fA-F]{8}$ ]]; then
-            echo 'Set the repository secret UNIXNU_UNIQUE_CHIP_ID: the platform seed of the device, 8 hex digits.' >&2
-            exit 1
-          fi
+          python3 device/scripts/prepare-pclm10-uefi.py \
+            --uefi uefi-pclm10 \
+            --device device \
+            --tree UniXNU
       - name: package
         working-directory: device
         env:
-          UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+          UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID || '19081001' }}
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/package.sh --os "${{ inputs.os }}" --uefi ../uefi-pclm10
       - name: images
         uses: actions/upload-artifact@v4
         with:
-          name: images-${{ inputs.os }}
-          retention-days: 1
+          name: images-pclm10-${{ inputs.os }}
+          retention-days: 7
           if-no-files-found: error
           path: |
             UniXNU/out/pclm10/*/*/boot/boot.img
