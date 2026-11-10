@@ -106,7 +106,8 @@ kernel_args = [
   "amfi_get_out_of_my_way=1",
   "qcom-usb-debug=1",
   "qcom-usb-ctl=1",
-  "native-ufs-probe=2",
+  "pclm10-autoreset=45",
+  "native-ufs-probe=0",
 ]
 
 [payload.adt]

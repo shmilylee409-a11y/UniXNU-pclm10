@@ -14,13 +14,15 @@
  
  #if (DEVELOPMENT || DEBUG)
  #include <kern/debug.h>
-@@ -1287,13 +1294,225 @@ bsdinit_task
+@@ -1287,13 +1294,252 @@ bsdinit_task
  
  	load_init_program(p);
  	lock_trace = 1;
 +}
 +
 +#if XNU_QCOM_USB_DEBUG
++extern char pclm10_usb_persist_line[384];
++extern int boot_reset_bootloader(char *, unsigned);
 +/* Exactly the Mach-private prototypes the worker needs, spelled here because
 + * this translation unit does not define MACH_KERNEL_PRIVATE (checked in
 + * bsd/DEVELOPMENT/bsd_init.o.json).  Using the real headers instead would
@@ -159,8 +161,24 @@
 +	}
 +
 +	qcom_usb_debug_get_status(&status);
++	printf("PCLM10 USB: %s (phase=%u err=%u qcom=%u dom=%u stg=%u)\n",
++	    pclm10_usb_persist_line[0] ? pclm10_usb_persist_line : "(empty)",
++	    status.phase, status.error, status.qcom_result,
++	    status.domain_result, status.domain_stage);
++	unsigned int autoreset_sec = 0;
++	(void)PE_parse_boot_argn("pclm10-autoreset", &autoreset_sec, sizeof(autoreset_sec));
 +	if (status.phase != QCOM_USB_DEBUG_ACTIVE) {
 +		kprintf("QCOM USB WORKER unavailable phase=%u error=%u\n", status.phase, status.error);
++		if (autoreset_sec > 0u) {
++			unsigned int wait_sec = autoreset_sec < 10u ? autoreset_sec : 10u;
++			printf("PCLM10 AUTORESET: USB refused; rebooting to fastboot in %us\n", wait_sec);
++			for (unsigned int w = 0; w < wait_sec * 200u; ++w) {
++				qcom_usb_worker_wait();
++			}
++			char rbuf[160];
++			(void)boot_reset_bootloader(rbuf, sizeof(rbuf));
++			printf("PCLM10 AUTORESET failed: %s\n", rbuf);
++		}
 +		goto stopped;
 +	}
 +	__atomic_store_n(&qcom_usb_worker_state, 2u, __ATOMIC_RELEASE);
@@ -179,6 +197,7 @@
 +			kprintf("QCOM USB CONTROL active hook=%u\n", status.control_hook_owned);
 +		}
 +	}
++	unsigned int idle_ticks = 0;
 +	for (;;) {
 +		/* The panic hook keeps its own separate bounded drain. */
 +		if (panic_active()) {
@@ -191,6 +210,14 @@
 +		qcom_usb_debug_poll();
 +		if (control_active) {
 +			qcom_usb_start_reboot_once();
++		}
++		if (autoreset_sec > 0u && status.control_replies == 0 &&
++		    ++idle_ticks >= autoreset_sec * 200u) {
++			char rbuf[160];
++			printf("PCLM10 AUTORESET: no USB host after %us; rebooting to fastboot\n", autoreset_sec);
++			(void)boot_reset_bootloader(rbuf, sizeof(rbuf));
++			printf("PCLM10 AUTORESET failed: %s\n", rbuf);
++			break;
 +		}
 +		qcom_usb_worker_wait();
 +	}

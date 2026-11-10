@@ -83,6 +83,25 @@ SM8150_H = """/* SPDX-License-Identifier: MIT
 #endif
 """
 
+PANIC_INACTIVE_ANCHOR = """    /* panic_spin_forever can precede CPU-data initialization. Inactive USB
+     * must not call cpu_number(), touch MMIO or acquire a guard in that case. */
+    if (native.status.phase != QCOM_USB_DEBUG_ACTIVE || !acquire(&flags)) return;"""
+
+PANIC_INACTIVE_REPLACEMENT = """    /* panic_spin_forever can precede CPU-data initialization. Inactive USB
+     * must not call cpu_number(), touch MMIO or acquire a guard in that case. */
+    if (native.status.phase != QCOM_USB_DEBUG_ACTIVE || !acquire(&flags)) {
+        unsigned int panic_reset_sec = 0;
+        if (PE_parse_boot_argn("pclm10-autoreset", &panic_reset_sec, sizeof(panic_reset_sec)) &&
+            panic_reset_sec > 0u) {
+            unsigned int wait_sec = panic_reset_sec < 12u ? panic_reset_sec : 12u;
+            for (unsigned int ms = 0; ms < wait_sec * 1000u; ++ms) {
+                delay_us(0, 1000);
+            }
+            qcom_usb_debug_control_reset_now();
+        }
+        return;
+    }"""
+
 PANIC_CTL_ANCHOR = """out:
     buffer_status_owned();
     release(flags);
@@ -95,8 +114,11 @@ PANIC_CTL_REPLACEMENT = """out:
     if (usb_diag_enabled) diag_reset(10);
     {
         int ctl_opt = 0;
+        unsigned int panic_reset_sec = 0;
+        (void)PE_parse_boot_argn("pclm10-autoreset", &panic_reset_sec, sizeof(panic_reset_sec));
         if (PE_parse_boot_argn("qcom-usb-ctl", &ctl_opt, sizeof(ctl_opt)) && ctl_opt == 1 &&
             qcom_usb_debug_control_start()) {
+            unsigned int ms = 0;
             for (;;) {
                 qcom_usb_debug_poll();
                 if (qcom_usb_debug_control_take_reboot()) {
@@ -104,6 +126,9 @@ PANIC_CTL_REPLACEMENT = """out:
                     if (qcom_usb_debug_control_arm_reboot()) {
                         qcom_usb_debug_control_reset_now();
                     }
+                }
+                if (panic_reset_sec > 0u && ++ms >= panic_reset_sec * 1000u) {
+                    qcom_usb_debug_control_reset_now();
                 }
                 delay_us(0, 1000);
             }
@@ -156,9 +181,13 @@ def prepare_source(src_dir: Path, dst_dir: Path) -> None:
 
     qud_c = dst_dir / "kernel/QcomXnuUsbDebug.c"
     text = qud_c.read_text(encoding="utf-8")
+    if text.count(PANIC_INACTIVE_ANCHOR) != 1:
+        raise SystemExit("Expected exactly 1 match for PANIC_INACTIVE_ANCHOR in QcomXnuUsbDebug.c")
     if text.count(PANIC_CTL_ANCHOR) != 1:
         raise SystemExit("Expected exactly 1 match for PANIC_CTL_ANCHOR in QcomXnuUsbDebug.c")
-    qud_c.write_text(text.replace(PANIC_CTL_ANCHOR, PANIC_CTL_REPLACEMENT, 1), encoding="utf-8")
+    text = text.replace(PANIC_INACTIVE_ANCHOR, PANIC_INACTIVE_REPLACEMENT, 1)
+    text = text.replace(PANIC_CTL_ANCHOR, PANIC_CTL_REPLACEMENT, 1)
+    qud_c.write_text(text, encoding="utf-8")
 
 
 def main() -> int:
