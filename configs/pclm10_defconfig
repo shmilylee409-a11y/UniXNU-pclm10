@@ -15,10 +15,9 @@ CONFIG_XNU_NATIVE_GOP_FRAMEBUFFER=y
 # panic region in _PE_create_console() before VBAR_EL1 is installed.
 CONFIG_XNU_DT_PANIC_REGION=y
 
-# Keep GPU and storage block kexts disabled for Stage 1 cloud bring-up
-# (Adreno740 is SM8550-only; storage block kexts require board storage ABI bindings).
+# Adreno740 is SM8550-only; enable SM8150 read-only UFS probe driver (Stage 1)
 # CONFIG_XNU_NATIVE_ADRENO is not set
-# CONFIG_XNU_NATIVE_UFS is not set
+CONFIG_XNU_NATIVE_UFS=y
 # CONFIG_XNU_NATIVE_RAM_BLOCK is not set
 # CONFIG_XNU_NATIVE_VIRTIO_BLOCK is not set
 # CONFIG_XNU_SYNTHETIC_ROOT_BLOCK is not set

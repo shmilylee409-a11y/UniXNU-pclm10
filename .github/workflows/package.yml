@@ -72,6 +72,11 @@ jobs:
 
       - name: prepare uefi-pclm10
         run: |
+          cp device/scripts/build-pclm10-ufs-readonly.py UniXNU/scripts/
+          mkdir -p UniXNU/.cache
+          rm -rf UniXNU/.cache/pclm10-ShengUfs
+          git clone https://github.com/UniXNU/ShengUfs.git UniXNU/.cache/pclm10-ShengUfs
+          git -C UniXNU/.cache/pclm10-ShengUfs checkout 99d8bcd3e43dd24fc3c8437c67b5d4cc71ab94d0
           python3 device/scripts/prepare-pclm10-uefi.py \
             --uefi uefi-pclm10 \
             --device device \

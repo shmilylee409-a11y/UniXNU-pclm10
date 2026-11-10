@@ -42,6 +42,7 @@ archives = [
   "build-mockfs-fixture.py",
   "build-libpthread-kernel.py",
   "component:AppleKeyStoreState",
+  "build-pclm10-ufs-readonly.py",
 ]
 
 [device_tree]
@@ -98,6 +99,10 @@ kernel_args = [
   "serial=3",
   "debug=0x14e",
   "keepsyms=1",
+  "-enable_kprintf_spam",
+  "security-mode-change-enable=1",
+  "amfi_get_out_of_my_way=1",
+  "native-ufs-probe=2",
 ]
 
 [payload.adt]
