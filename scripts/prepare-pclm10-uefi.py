@@ -315,7 +315,6 @@ gMemoryDescriptor[] = {
   {"DXE Heap",           0xA5800000, 0x1A800000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv,   WRITE_BACK_XN},
 
   // Other Memory Regions
-  {"AOP_SS_MSG_RAM",     0x0C300000, 0x00100000, NoHob,  MMAP_IO, INITIALIZED, Conv,   NS_DEVICE},
   {"IMEM Base",          0x14680000, 0x00040000, NoHob,  MMAP_IO, INITIALIZED, Conv,   NS_DEVICE},
 
   // Register Regions (SM8150 / Coarse non-overlapping blocks < 64 total entries)
