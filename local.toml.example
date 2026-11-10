@@ -1,0 +1,6 @@
+# Copy to local.toml (ignored by Git) to point whole categories or specific sources
+# at local directories during development.
+[[source]]
+name = "sm8150"
+kind = "soc"
+local = "../UniXNU-sm8150-common"

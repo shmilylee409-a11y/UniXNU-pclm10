@@ -1,0 +1,215 @@
+// SPDX-License-Identifier: BSD-2-Clause-Patent
+// Device tree for OPPO Reno Ace (PCLM10, OPPO project 19081, SM8150-AC).
+// Hardware addresses verified against:
+// - guh0613/android_kernel_oppo_sm8150 (arch/arm64/boot/dts/19081/sm8150-mtp.dtsi,
+//   arch/arm64/boot/dts/19081/sm8150-sde-display.dtsi)
+// - Project-Aloha/mu_aloha_platforms (Platforms/SurfaceDuo1Pkg/Device/oppo-pclm10/)
+
+/dts-v1/;
+
+/include/ "sm8150.dtsi"
+
+/ {
+    model = "OPPO Reno Ace (PCLM10)";
+    compatible = "oppo,pclm10", "oppo,19081", "qcom,sm8150";
+    qcom,msm-id = <0x153 0x20000>;
+    qcom,board-id = <8 0>;
+    oppo,dtsi_no = <19081>;
+
+    // Contiguous DRAM window above the 0xbbb00000..0xc0000000 firmware carveout hole.
+    // Bank 1 provides 2 GiB (0xc0000000..0x140000000) as the safe baseline; Bank 2
+    // extends contiguously from 0x140000000 on 8 GB / 12 GB retail configurations.
+    memory@c0000000 {
+        device_type = "memory";
+        reg = <0x0 0xc0000000 0x0 0x80000000>;
+    };
+
+    reserved-memory {
+        #address-cells = <2>;
+        #size-cells = <2>;
+        ranges;
+
+        hyp_mem: hyp-region@85700000 {
+            reg = <0x0 0x85700000 0x0 0x00600000>;
+            no-map;
+        };
+
+        xbl_aop_mem: xbl-aop-region@85d00000 {
+            // Includes MP EFS (0x85d00000) and AOP CMD DB (0x85f20000, size 0x20000).
+            reg = <0x0 0x85d00000 0x0 0x00240000>;
+            no-map;
+        };
+
+        gpu_prr_mem: gpu-prr-region@85f40000 {
+            reg = <0x0 0x85f40000 0x0 0x00010000>;
+            no-map;
+        };
+
+        smem_mem: smem-region@86000000 {
+            reg = <0x0 0x86000000 0x0 0x00200000>;
+            no-map;
+        };
+
+        qtee_mem: qtee-region@86200000 {
+            reg = <0x0 0x86200000 0x0 0x01800000>;
+            no-map;
+        };
+
+        tzapps_mem: tzapps-region@87a00000 {
+            // Expanded to 94 MiB (0x05d00000) on OPPO project 19081 for OPLUS_FEATURE_FINGERPRINT_SECURE.
+            reg = <0x0 0x87a00000 0x0 0x05d00000>;
+            no-map;
+        };
+
+        pil_mem: pil-region@8d700000 {
+            // Peripheral Image Loader carveout (0x8d700000..0x9cb00000), containing:
+            // - modem_region      @ 0x8dc00000 (size 0x09800000)
+            // - video_region      @ 0x97c00000 (size 0x00500000)
+            // - sdsp_region       @ 0x98100000 (size 0x01400000)
+            // - ipa_fw_region     @ 0x99500000 (size 0x00010000)
+            // - ipa_gsi_region    @ 0x99510000 (size 0x00005000)
+            // - gpu_region (ZAP)  @ 0x99515000 (size 0x00002000)
+            // - spss_region       @ 0x99600000 (size 0x00100000)
+            // - cdsp_region       @ 0x99700000 (size 0x01400000)
+            // - camera_region     @ 0x9ab00000 (size 0x00500000)
+            // - wlan_fw_region    @ 0x9b000000 (size 0x00180000)
+            // - npu_region        @ 0x9b180000 (size 0x00080000)
+            // - adsp_region       @ 0x9b200000 (size 0x01e00000)
+            reg = <0x0 0x8d700000 0x0 0x0f400000>;
+            no-map;
+        };
+
+        cont_splash_region: framebuffer@9d000000 {
+            // UEFI GOP Display Reserved region for Samsung SOFEF03F-M (1080x2400 @ 32bpp, stride 4320).
+            reg = <0x0 0x9d000000 0x0 0x02400000>;
+            no-map;
+        };
+
+        fv_region: fv-region@9f800000 {
+            reg = <0x0 0x9f800000 0x0 0x00400000>;
+            no-map;
+        };
+
+        uefi_fd_region: uefi-fd@9fc00000 {
+            reg = <0x0 0x9fc00000 0x0 0x00300000>;
+            no-map;
+        };
+
+        sec_heap_region: sec-heap@9ff00000 {
+            // SEC Heap, CPU Vectors, ArmMpCoreInfo, Page Tables, Stack, Runtime Data (0x9ff00000..0xa0000000).
+            reg = <0x0 0x9ff00000 0x0 0x00100000>;
+            no-map;
+        };
+
+        pstore_region: ramoops@17fe00000 {
+            compatible = "ramoops";
+            reg = <0x1 0x7fe00000 0x0 0x00200000>;
+            record-size = <0x40000>;
+            console-size = <0x40000>;
+            ftrace-size = <0x40000>;
+            pmsg-size = <0x40000>;
+        };
+    };
+
+    soc {
+        framebuffer0: framebuffer@9d000000 {
+            compatible = "simple-framebuffer";
+            reg = <0x0 0x9d000000 0x0 0x02400000>;
+            width = <1080>;
+            height = <2400>;
+            stride = <4320>;
+            format = "a8r8g8b8";
+            // Panel: dsi_samsung_sofef03f_m_amoled_fhd_plus_90fps_cmd
+            // Single-DSI command-mode AMOLED with DSC, 1080x2400 @ 90Hz
+            // TLMM GPIOs: TE=8, Reset=6, VDDD(1.1V)=152, VCI(3.0V)=25, ErrFlag=49
+            status = "okay";
+        };
+
+        qupv3_se17_i2c: i2c@c80000 {
+            compatible = "qcom,i2c-geni";
+            reg = <0x0 0x00c80000 0x0 0x4000>;
+            #address-cells = <1>;
+            #size-cells = <0>;
+            clock-frequency = <400000>;
+            status = "okay";
+
+            // Primary touchscreen: Synaptics S3706 on QUPv3 SE17 I2C (qupv3_2 wrapper @ 0x00c00000, GIC SPI 373)
+            // TLMM irq-gpio = 122, reset-gpio = 54, vdd_2v8 = pm8150_l17 (3.0V), enable1v8_gpio = pm8150l_gpios 5
+            touchscreen@20 {
+                compatible = "synaptics,s3706", "synaptics-s3706";
+                reg = <0x20>;
+                touchpanel,max-num-support = <10>;
+                touchpanel,tx-rx-num = <15 34>;
+                touchpanel,panel-coords = <1080 2400>;
+                touchpanel,display-coords = <1080 2400>;
+                status = "okay";
+            };
+        };
+
+        qupv3_se7_i2c: i2c@89c000 {
+            compatible = "qcom,i2c-geni";
+            reg = <0x0 0x0089c000 0x0 0x4000>;
+            #address-cells = <1>;
+            #size-cells = <0>;
+            clock-frequency = <400000>;
+            status = "okay";
+
+            // Linear resonant actuator haptic driver: Awinic AW8697 @ 0x5a (reset GPIO 116, irq GPIO 24)
+            haptic@5a {
+                compatible = "awinic,aw8697_haptic";
+                reg = <0x5a>;
+                status = "okay";
+            };
+        };
+
+        qupv3_se1_i2c: i2c@a80000 {
+            compatible = "qcom,i2c-geni";
+            reg = <0x0 0x00a80000 0x0 0x4000>;
+            #address-cells = <1>;
+            #size-cells = <0>;
+            clock-frequency = <100000>;
+            status = "okay";
+
+            // 65W SuperVOOC 2.0 dual-cell fuel gauge & fast-charge MCU
+            battery@55 {
+                compatible = "oppo,bq27541-battery";
+                reg = <0x55>;
+                status = "okay";
+            };
+
+            fastcg@26 {
+                compatible = "oppo,stm8s-fastcg";
+                reg = <0x26>;
+                status = "okay";
+            };
+        };
+    };
+};
+
+&ufs {
+    status = "okay";
+};
+
+&ufs_smmu {
+    status = "okay";
+};
+
+&gpu {
+    status = "okay";
+};
+
+&gmu {
+    status = "okay";
+};
+
+&gpu_smmu {
+    status = "okay";
+};
+
+&gpucc {
+    status = "okay";
+};
+
+&gcc {
+    status = "okay";
+};

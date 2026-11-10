@@ -1,0 +1,86 @@
+# Format 2 device manifest for OPPO Reno Ace (PCLM10, OPPO project 19081, SM8150-AC).
+schema_version = 2
+
+[board]
+name = "pclm10"
+soc = "SM8150"
+soc_source = "sm8150"
+os_profile = "ipados-17.7.11-21H461"
+description = "OPPO Reno Ace (PCLM10, project 19081, SM8150-AC)"
+kit = "pclm10"
+
+[components]
+include = [
+    "ArmDTPlatform",
+    "ArmCpu",
+    "SoftwareAES",
+    "DarwinBoot",
+    "XnuPrelink",
+    "GopFramebuffer",
+    "RamBlock",
+    "VirtioMmioBlock",
+    "ShengUfs",
+    "VerifiedRoot",
+    "AppleKeyStoreState",
+]
+
+[kernel]
+defconfig = "pclm10_defconfig"
+config_fragments = [
+    "arch:configs/common.config",
+    "soc:configs/sm8150.config",
+    "os:configs/ipados.config",
+]
+patch_series = [
+    "arch:patches/xnu/series",
+    "soc:patches/xnu/series",
+    "os:patches/xnu/series",
+    "device:patches/xnu/series",
+]
+
+[device_tree]
+source = "device:dts/pclm10.dts"
+include_dirs = ["soc:dts"]
+
+# Packaging recipe (docs/porting/packaging.md). scripts/package.sh reads this
+# file and runs `unixnu release -D .`; these sections drive its steps.
+[package]
+unixnu = "../UniXNU"
+output = "{board.name}"
+
+[firmware]
+config = "pclm10"
+dsc = "Platforms/OPPO/pclm10Pkg/pclm10.dsc"
+fd = "Build/pclm10Pkg/{target}_CLANGPDB/FV/SILICIUM_UEFI.fd"
+packages = ["{uefi}", "{tree}/package", "{tree}/drivers/DarwinBoot", "{edk2}"]
+
+[firmware.defines]
+DEVICE_MODEL = "pclm10"
+
+[bootimg]
+
+# OPPO Reno Ace UEFI GOP continuous splash framebuffer reservation:
+# 1080x2400 @ 32bpp (stride 4320) inside 0x9d000000..0x9f400000 (36 MiB).
+[[bootimg.dtb_node]]
+path = "/reserved-memory/cont_splash_region"
+address = "0x9d000000"
+size = "0x02400000"
+
+[payload]
+volume = "PCLM10"
+size_mib = 192
+loader = "firmware"
+title = "UniXNU (OPPO Reno Ace)"
+dram_size = "0x80000000"
+panic_screen = true
+kernel_args = ["-v", "serial=3", "cpus=8", "armcpu-self-ipi=1"]
+
+[payload.adt]
+chip_id = "32785"
+owned_memory_size = "0x40000000"
+root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
+cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x600,0x700"
+psci_method = "smc"
+packed_data_ramdisk = true
+ipad_identity = true
+unique_chip_id = "required"

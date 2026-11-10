@@ -1,0 +1,5 @@
+# Board kernel configuration for OPPO Reno Ace (PCLM10, project 19081, SM8150-AC).
+# Architecture, SoC, and OS fragments in board.toml are merged ahead of this file;
+# only board-specific overrides belong here.
+CONFIG_BOARD_PCLM10=y
+CONFIG_SOC_SM8150=y

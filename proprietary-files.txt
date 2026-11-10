@@ -1,0 +1,19 @@
+# Proprietary vendor files for OPPO Reno Ace (PCLM10, project 19081, SM8150-AC),
+# relative to Android /vendor/. Extracted on demand from stock ColorOS / RealmeUI
+# vendor partition; never committed to git.
+
+# Adreno 640 v2 GPU microcode, GMU firmware, and signed ZAP shader
+firmware/a640_sqe.fw
+firmware/a640_gmu.bin
+firmware/a640_zap.mdt
+firmware/a640_zap.b00
+firmware/a640_zap.b01
+firmware/a640_zap.b02
+firmware/a640_zap.elf
+
+# Synaptics S3706 touch panel firmware (OPPO project 19081)
+firmware/tp/19081/19081_FW_S3706_SYNAPTICS.img
+
+# Awinic AW8697 LRA haptic waveform bins
+firmware/aw8697_haptic.bin
+firmware/aw8697_rtp.bin
