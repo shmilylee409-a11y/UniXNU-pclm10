@@ -398,6 +398,8 @@ def main() -> int:
         "-DNATIVE_VERIFIED_BLOCK=0",
         "-Wall", "-Wextra", "-Werror",
         "-Wno-unused-parameter",
+        "-Wno-unused-function",
+        "-Wno-unused-variable",
         "-Wno-c99-designator",
         "-Wno-reorder-init-list",
         "-Wno-deprecated-enum-enum-conversion",
