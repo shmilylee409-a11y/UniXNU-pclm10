@@ -312,7 +312,9 @@ gMemoryDescriptor[] = {
   {"Info Blk",           0x9FFFF000, 0x00001000, AddMem, SYS_MEM, SYS_MEM_CAP, RtData, WRITE_BACK_XN},
   {"QSEECOM",            0xA0000000, 0x01400000, AddMem, MEM_RES, UNCACHEABLE, Reserv, UNCACHED_UNBUFFERED_XN},
   {"CDSP_SEC",           0xA4C00000, 0x00C00000, AddMem, MEM_RES, UNCACHEABLE, Reserv, UNCACHED_UNBUFFERED_XN},
-  {"DXE Heap",           0xA5800000, 0x1A800000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv,   WRITE_BACK_XN},
+  // 0xA5800000..0xC0300000 is left unmapped, like the working SM8150 cepheus port:
+  // XBL/TZ may protect parts of it, and the HOB list + MMU page tables must live in RAM that is known to be ours.
+  {"DXE Heap",           0xC0300000, 0x04500000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv,   WRITE_BACK_XN},
 
   // Other Memory Regions
   {"IMEM Base",          0x14680000, 0x00040000, NoHob,  MMAP_IO, INITIALIZED, Conv,   NS_DEVICE},
@@ -418,6 +420,32 @@ GetConfigurationMap (
 """
 
 
+MMU_DIAG_ANCHOR = '  DEBUG ((EFI_D_WARN, "MMU: HOBs built, enabling\\n"));'
+MMU_DIAG_CODE = """\
+  // pclm10 bring-up diagnostics: show that the HOB list reads back and how many MMU entries are passed.
+  {
+    EFI_HOB_HANDOFF_INFO_TABLE *Phit = (EFI_HOB_HANDOFF_INFO_TABLE *)GetHobList ();
+    DEBUG ((EFI_D_WARN, "MMU: PHIT %p type 0x%x free 0x%lx-0x%lx\\n", Phit, (UINT32)Phit->Header.HobType, (UINT64)Phit->EfiFreeMemoryBottom, (UINT64)Phit->EfiFreeMemoryTop));
+    DEBUG ((EFI_D_WARN, "MMU: %u table entries, last 0x%lx+0x%lx\\n", (UINT32)Index, (UINT64)MemoryTable[Index ? Index - 1 : 0].PhysicalBase, (UINT64)MemoryTable[Index ? Index - 1 : 0].Length));
+  }
+"""
+
+
+def patch_mmu_diagnostics(uefi_dir: Path) -> None:
+    src = uefi_dir / "Silicon" / "Silicium" / "SiliciumPkg" / "Library" / "MemoryInitPeiLib" / "MemoryInitPei.c"
+    if not src.is_file():
+        print(f"WARNING: {src} not found, MMU diagnostics not added")
+        return
+    text = src.read_text(encoding="utf-8")
+    if "pclm10 bring-up diagnostics" in text:
+        return
+    if MMU_DIAG_ANCHOR not in text:
+        print("WARNING: MMU diagnostics anchor not found, skipped")
+        return
+    src.write_text(text.replace(MMU_DIAG_ANCHOR, MMU_DIAG_CODE + MMU_DIAG_ANCHOR, 1), encoding="utf-8")
+    print(f"Added MMU diagnostics to {src}")
+
+
 def write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
@@ -485,6 +513,7 @@ def main() -> int:
             pkg_dir / "Library" / "ConfigurationMapLib" / "ConfigurationMapLib.c",
             CONFIG_MAP_C,
         )
+        patch_mmu_diagnostics(uefi_dir)
         print(f"Injected pclm10Pkg into {uefi_dir}")
 
     return 0
