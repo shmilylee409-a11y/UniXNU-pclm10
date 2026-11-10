@@ -73,10 +73,15 @@ jobs:
       - name: prepare uefi-pclm10
         run: |
           cp device/scripts/build-pclm10-ufs-readonly.py UniXNU/scripts/
+          cp device/scripts/build-pclm10-usb-debug.py UniXNU/scripts/
           mkdir -p UniXNU/.cache
-          rm -rf UniXNU/.cache/pclm10-ShengUfs
+          cp device/package/Pclm10BootReset.c UniXNU/.cache/pclm10-Pclm10BootReset.c
+          rm -rf UniXNU/.cache/pclm10-ShengUfs UniXNU/.cache/pclm10-QcomXnuUsbDebug
           git clone https://github.com/UniXNU/ShengUfs.git UniXNU/.cache/pclm10-ShengUfs
           git -C UniXNU/.cache/pclm10-ShengUfs checkout 99d8bcd3e43dd24fc3c8437c67b5d4cc71ab94d0
+          git clone https://github.com/FFT-infra/QcomXnuUsbDebug.git UniXNU/.cache/pclm10-QcomXnuUsbDebug
+          git -C UniXNU/.cache/pclm10-QcomXnuUsbDebug checkout 18bcc385bc0c97ff38343a83040f19711392867b
+          python3 device/scripts/enable-xnu-qud-link.py UniXNU/scripts/build-xnu-4k-baseline.sh
           python3 device/scripts/prepare-pclm10-uefi.py \
             --uefi uefi-pclm10 \
             --device device \

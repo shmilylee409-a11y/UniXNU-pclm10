@@ -287,6 +287,20 @@ bool NativeUfs::start (IOService *provider)""",
         "start() probe>=10 guard start",
     )
     replace_exact(
+        "  if (rootMode && !probe) {\n    return startRoot (provider);\n  }\n  return false;\n}\n\n// Boot the root image's windows as block devices. Soft-fails (logs, publishes nothing).\nbool NativeUfs::startRoot (IOService *provider)",
+        """  if (rootMode && !probe) {
+    return startRoot (provider);
+  }
+#endif
+  return false;
+}
+
+#if !defined(PCLM10_UFS_PROBE_ONLY)
+// Boot the root image's windows as block devices. Soft-fails (logs, publishes nothing).
+bool NativeUfs::startRoot (IOService *provider)""",
+        "start() guard end + startRoot guard start",
+    )
+    replace_exact(
         "void NativeUfs::stop (IOService *provider)",
         """#else
 bool NativeUfs::startRoot (IOService *) { return false; }
@@ -313,9 +327,11 @@ def main() -> int:
 
     src_dir = args.source
     if src_dir is None:
+        fallback = ROOT / "build/sheng-ufs/upstream"
         candidates = [
             ROOT / "drivers/ShengUfs",
             ROOT / ".cache/pclm10-ShengUfs",
+            fallback,
         ]
         # In format-2 builds, ROOT is out/<board>/<os>/<config>/tree while pre-staged
         # caches can live under the UniXNU repo root or UNIXNU_DEVICE.
@@ -328,7 +344,8 @@ def main() -> int:
                 src_dir = candidate
                 break
         if src_dir is None:
-            fallback = ROOT / "build/sheng-ufs/upstream"
+            if fallback.exists():
+                shutil.rmtree(fallback)
             fallback.parent.mkdir(parents=True, exist_ok=True)
             subprocess.run(
                 ["git", "clone", "https://github.com/UniXNU/ShengUfs.git", str(fallback)],

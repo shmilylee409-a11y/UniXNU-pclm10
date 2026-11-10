@@ -43,6 +43,7 @@ archives = [
   "build-libpthread-kernel.py",
   "component:AppleKeyStoreState",
   "build-pclm10-ufs-readonly.py",
+  "build-pclm10-usb-debug.py",
 ]
 
 [device_tree]
@@ -102,6 +103,8 @@ kernel_args = [
   "-enable_kprintf_spam",
   "security-mode-change-enable=1",
   "amfi_get_out_of_my_way=1",
+  "qcom-usb-debug=1",
+  "qcom-usb-ctl=1",
   "native-ufs-probe=2",
 ]
 

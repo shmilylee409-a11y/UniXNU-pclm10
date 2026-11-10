@@ -1,3 +1,4 @@
 sheng-platform-power.patch
 pclm10-console.patch
-
+0001-qcom-usb-debug-console.patch
+0002-qcom-usb-debug-worker.patch
