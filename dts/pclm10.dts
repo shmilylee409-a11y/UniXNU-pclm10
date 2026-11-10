@@ -112,6 +112,12 @@
     };
 
     soc {
+        // Identity mapping for the entire 64-bit SoC register space.
+        // Overrides the narrow 0x17000000..0x1f000000 ranges in sm8150.dtsi
+        // so that ufs (0x01d84000), ufs_smmu (0x15000000), gpu (0x02c00000),
+        // and board I2C controllers translate 1:1 into physical MMIO.
+        ranges;
+
         framebuffer0: framebuffer@9d000000 {
             compatible = "simple-framebuffer";
             reg = <0x0 0x9d000000 0x0 0x02400000>;
