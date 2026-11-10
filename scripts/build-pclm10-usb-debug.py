@@ -191,7 +191,7 @@ def main() -> int:
     if not ar or not nm:
         raise SystemExit(f"Missing archiver/nm tools: ar={ar} nm={nm}")
 
-    cache_out = out / ".cache-build"
+    cache_out = out / ".cache/build"
     subprocess.run(
         [
             sys.executable,
