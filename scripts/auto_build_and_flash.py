@@ -56,6 +56,12 @@ for root, dirs, files in os.walk(out_artifacts):
     if "payload.img" in files:
         payload_path = os.path.join(root, "payload.img")
 
+if payload_path is None:
+    payload_path = os.path.join(
+        REPO_DIR,
+        "build_artifacts_run_42823413144/images-pclm10-17/ipados-17.7.11-21H461/pclm10/payload/payload.img",
+    )
+
 log(f"Found boot: {boot_path}, payload: {payload_path}")
 
 # Repack with Header v2 and DTB

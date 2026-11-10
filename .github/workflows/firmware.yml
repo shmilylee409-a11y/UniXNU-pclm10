@@ -1,0 +1,91 @@
+name: firmware
+
+# Fast UEFI-only workflow on ubuntu-latest (zero macOS runner queue time, ~90s total).
+# Produces SILICIUM_UEFI.fd and boot.img (UEFI kernel + DTB) which is then combined
+# with the cached 75 MiB payload.img on the host.
+
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: "OS profile of the images"
+        type: choice
+        options: ["17", "26", "27"]
+        default: "17"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: checkout device
+        uses: actions/checkout@v4
+        with:
+          path: device
+          submodules: recursive
+
+      - name: checkout UniXNU
+        uses: actions/checkout@v4
+        with:
+          repository: UniXNU/UniXNU
+          ref: 95ad78129203442c3c14c02336303adbddf8d0a3
+          path: UniXNU
+
+      - name: init UniXNU submodules safely
+        working-directory: UniXNU
+        run: |
+          git submodule sync
+          for sub in $(git config --file .gitmodules --get-regexp path | awk '{print $2}'); do
+            echo "Initializing submodule $sub..."
+            git submodule update --init --recursive "$sub" || {
+              echo "Retrying $sub tracking remote main..."
+              git submodule update --init --remote "$sub" || true
+            }
+          done
+
+      - name: checkout uefi-sheng
+        uses: actions/checkout@v4
+        with:
+          repository: UniXNU/uefi-sheng
+          path: uefi-pclm10
+
+      - name: tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm device-tree-compiler uuid-dev build-essential python3
+          for t in clang lld-link llvm-lib llvm-rc llvm-nm llvm-objcopy dtc fdtget fdtput make python3; do
+            command -v "$t" >/dev/null || { echo "missing tool: $t"; exit 1; }
+          done
+
+      - name: prepare uefi-pclm10
+        run: |
+          python3 device/scripts/prepare-pclm10-uefi.py \
+            --uefi uefi-pclm10 \
+            --device device \
+            --tree UniXNU
+
+      - name: build firmware and boot.img
+        env:
+          UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID || '19081001' }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 UniXNU/unixnu build firmware -D device --os "${{ inputs.os }}" --uefi uefi-pclm10
+          python3 UniXNU/unixnu bootimg -D device --os "${{ inputs.os }}" --uefi uefi-pclm10 \
+            --dtb UniXNU/build/pclm10/pclm10.dtb --ramdisk none -o boot.img
+
+      - name: upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-pclm10-${{ inputs.os }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            boot.img
+            uefi-pclm10/Build/pclm10Pkg/*/FV/SILICIUM_UEFI.fd
