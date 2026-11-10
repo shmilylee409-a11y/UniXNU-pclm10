@@ -182,15 +182,14 @@ READ_LOCK_CAP      = TRUE
 READ_LOCK_STATUS   = TRUE
 
   INF SiliciumPkg/Sec/Sec.inf
-  INF QcomPkg/Pei/PlatformPei.inf
 
   FILE FV_IMAGE = 9E21FD93-9C72-4c15-8C4B-E77F1DB2D792 {
     SECTION GUIDED EE4E5898-3914-4259-9D6E-DC7BD79403CF PROCESSING_REQUIRED = TRUE {
-      SECTION FV_IMAGE = FvMain
+      SECTION FV_IMAGE = FVMAIN
     }
   }
 
-!include Silicon/Silicium/SiliciumPkg/Include/Rules.inc
+  !include SiliciumPkg/Common.fdf.inc
 """
 
 PCLM10_APRIORI = """\
