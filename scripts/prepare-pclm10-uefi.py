@@ -165,6 +165,8 @@ READ_LOCK_STATUS   = TRUE
   INF UniXNUPkg/Application/UniXNU/UniXNU.inf
   INF UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf
 
+  !include QcomPkg/Extra.fdf.inc
+
 [FV.FVMAIN_COMPACT]
 FvAlignment        = 8
 ERASE_POLARITY     = 1
