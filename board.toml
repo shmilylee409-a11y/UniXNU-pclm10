@@ -90,7 +90,7 @@ dtb = "build/pclm10/pclm10.dtb"
 
 [payload]
 volume = "PCLM10"
-size_mib = 192
+size_mib = 75
 loader = "firmware"
 title = "UniXNU (OPPO Reno Ace)"
 kernel_args = [
