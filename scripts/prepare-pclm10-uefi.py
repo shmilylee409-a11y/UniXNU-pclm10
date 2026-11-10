@@ -152,8 +152,10 @@ READ_LOCK_STATUS   = TRUE
   !include Include/APRIORI.inc
   !include Include/DXE.inc
 
-  # RAM Manager
+  # RAM Manager reads the RAM partition table published by the vendor stack.
+!if $(SHENG_VENDOR_HW) == 1
   INF SiliciumPkg/Drivers/RamManagerDxe/RamManagerDxe.inf
+!endif
 
   # SmBios
   INF MdeModulePkg/Universal/SmbiosDxe/SmbiosDxe.inf
