@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 from pathlib import Path
 
 PCLM10_RESET_C = r'''/*
@@ -26,6 +27,7 @@ PCLM10_RESET_C = r'''/*
 #include <pexpert/pexpert.h>
 
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+extern vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, uint32_t flags);
 extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
 extern void thread_deallocate(thread_t);
 extern int hz;
@@ -103,7 +105,8 @@ br_udelay(uint32_t usec)
 	if (!ticks) {
 		ticks = 1;
 	}
-	for (;;) {
+	uint64_t max_spins = (uint64_t)usec * 250ULL + 2000ULL;
+	for (uint64_t spins = 0; spins < max_spins; ++spins) {
 		uint64_t now = 0;
 		__asm__ volatile("mrs %0, cntvct_el0" : "=r"(now));
 		if ((now - start) >= ticks) {
@@ -199,12 +202,21 @@ pclm10_reset_premap(void)
 		return;
 	}
 	br_premapped = true;
-	br_imem = ml_io_map(BR_IMEM_BASE, BR_IMEM_SIZE);
-	br_pshold = ml_io_map(BR_PSHOLD_BASE, BR_PSHOLD_SIZE);
-	br_wdt = ml_io_map(BR_WDT_BASE, BR_WDT_SIZE);
-	br_spmi_core = ml_io_map(SPMI_CORE_BASE, SPMI_CORE_SIZE);
-	br_spmi_cnfg = ml_io_map(SPMI_CNFG_BASE, SPMI_CNFG_SIZE);
-	br_spmi_obs = ml_io_map(SPMI_OBS_BASE, SPMI_OBS_SIZE);
+	br_imem = ml_io_map_unmappable(BR_IMEM_BASE, BR_IMEM_SIZE, 7u);
+	if (!br_imem) {
+		br_imem = ml_io_map(BR_IMEM_BASE, BR_IMEM_SIZE);
+	}
+	br_pshold = ml_io_map_unmappable(BR_PSHOLD_BASE, BR_PSHOLD_SIZE, 7u);
+	if (!br_pshold) {
+		br_pshold = ml_io_map(BR_PSHOLD_BASE, BR_PSHOLD_SIZE);
+	}
+	br_wdt = ml_io_map_unmappable(BR_WDT_BASE, BR_WDT_SIZE, 7u);
+	if (!br_wdt) {
+		br_wdt = ml_io_map(BR_WDT_BASE, BR_WDT_SIZE);
+	}
+	br_spmi_core = ml_io_map_unmappable(SPMI_CORE_BASE, SPMI_CORE_SIZE, 7u);
+	br_spmi_cnfg = ml_io_map_unmappable(SPMI_CNFG_BASE, SPMI_CNFG_SIZE, 7u);
+	br_spmi_obs = ml_io_map_unmappable(SPMI_OBS_BASE, SPMI_OBS_SIZE, 7u);
 	if (br_spmi_core && br_spmi_cnfg && br_spmi_obs) {
 		uint32_t ver = br_spmi_rd(br_spmi_core, 0u);
 		uint32_t cnt = br_spmi_rd(br_spmi_core, 4u) & 0x7ffu;
@@ -212,9 +224,9 @@ pclm10_reset_premap(void)
 			br_spmi_count = cnt;
 			int apid = br_spmi_find_apid((PON_SPARE_ADDR >> 8) & 0xfffu);
 			if (apid >= 0) {
-				br_pon_lane = ml_io_map(
+				br_pon_lane = ml_io_map_unmappable(
 				    (vm_offset_t)(SPMI_CHNLS_BASE + SPMI_CHNL_STRIDE * (unsigned)apid),
-				    SPMI_CHNL_STRIDE);
+				    SPMI_CHNL_STRIDE, 7u);
 			}
 			(void)br_spmi_obs_read8(PON_SUBTYPE_ADDR, &br_pon_subtype);
 		}
@@ -249,14 +261,10 @@ br_pon_mark_bootloader(void)
 int
 pclm10_boot_reset_bootloader(void)
 {
-	if (!br_imem) {
-		return 1;
-	}
-	volatile uint32_t *cell = (volatile uint32_t *)(br_imem + BR_IMEM_REASON_OFF);
-	*cell = BR_REASON_BOOTLOADER;
-	__asm__ volatile("dsb sy" ::: "memory");
-	if (*cell != BR_REASON_BOOTLOADER) {
-		return 11;
+	if (br_imem) {
+		volatile uint32_t *cell = (volatile uint32_t *)(br_imem + BR_IMEM_REASON_OFF);
+		*cell = BR_REASON_BOOTLOADER;
+		__asm__ volatile("dsb sy" ::: "memory");
 	}
 	br_pon_mark_bootloader();
 	(void)br_scm_pwr(0x1ULL, 0ULL);
@@ -325,13 +333,11 @@ pclm10_early_panic_reset(volatile uint32_t *imem)
 	for (unsigned int i = 0; i < sec * 10u; ++i) {
 		br_udelay(100000u);
 	}
-	if (br_imem) {
-		(void)pclm10_boot_reset_bootloader();
-	}
 	if (imem != NULL) {
 		imem[BR_IMEM_REASON_OFF / 4u] = BR_REASON_BOOTLOADER;
 		__asm__ volatile("dsb sy" ::: "memory");
 	}
+	(void)pclm10_boot_reset_bootloader();
 	(void)br_scm_pwr(0x1ULL, 0ULL);
 	(void)br_scm_pwr(0x2ULL, 0ULL);
 	(void)br_smc_psci(PSCI_SYSTEM_RESET, 0ULL);
@@ -779,10 +785,21 @@ def apply_overlay(xnu: Path) -> None:
     )
 
     # 6. Start USB ECM + watchdog early in IOFindBSDRoot (works for both rd=md0 and rd=ufsroot0)
+    #    Skipped when qcom-usb-debug=1 so QcomXnuUsbDebug owns DWC3 and pclm10-autoreset exclusively.
     replace_exact(
         xnu / 'iokit/bsddev/IOKitBSDInit.cpp',
         '\tif (strcmp(rdBootVar, "ufsroot0") == 0) {',
-        '\t{\n\t\textern void pclm10_watchdog_start(void);\n\t\textern void sweet_usb_probe(void);\n\t\tpclm10_watchdog_start();\n\t\tsweet_usb_probe();\n\t}\n\tif (strcmp(rdBootVar, "ufsroot0") == 0) {',
+        '\t{\n'
+        '\t\tuint32_t qud_enabled = 0;\n'
+        '\t\tPE_parse_boot_argn("qcom-usb-debug", &qud_enabled, sizeof(qud_enabled));\n'
+        '\t\tif (qud_enabled != 1) {\n'
+        '\t\t\textern void pclm10_watchdog_start(void);\n'
+        '\t\t\textern void sweet_usb_probe(void);\n'
+        '\t\t\tpclm10_watchdog_start();\n'
+        '\t\t\tsweet_usb_probe();\n'
+        '\t\t}\n'
+        '\t}\n'
+        '\tif (strcmp(rdBootVar, "ufsroot0") == 0) {',
         'IOKitBSDInit start USB and watchdog',
     )
 
@@ -841,11 +858,486 @@ def apply_overlay(xnu: Path) -> None:
     print(f'Applied PCLM10 SM8150 overlay cleanly onto {xnu}')
 
 
+def apply_qud_overlay(xnu: Path, qud_dir: Path, boot_reset_c: Path | None) -> None:
+    dst = xnu / 'pexpert/qcom_usb_debug'
+    if dst.exists():
+        shutil.rmtree(dst)
+    dst.mkdir(parents=True)
+    for sub in ('include', 'kernel', 'soc', 'usb'):
+        shutil.copytree(qud_dir / sub, dst / sub)
+    if boot_reset_c is None:
+        raise SystemExit('--boot-reset-c is required when --qud-dir is passed')
+    shutil.copy2(boot_reset_c, dst / 'Pclm10BootReset.c')
+
+    replace_exact(
+        dst / 'include/QcomUsbSoc.h',
+        '#ifndef QUD_SOC_HEADER\n#error "Select hardware with -DQUD_SOC_HEADER=\\"soc/Sm8550.h\\""\n#endif',
+        '#ifndef QUD_SOC_HEADER\n#define QUD_SOC_HEADER "soc/Sm8150.h"\n#endif',
+        'QcomUsbSoc.h default Sm8150.h',
+    )
+
+    replace_exact(
+        xnu / 'makedefs/MakeInc.def',
+        'MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET                -march=armv8.2-a+crypto',
+        'MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET                -march=armv8.2-a+crypto '
+        '-DXNU_QCOM_USB_DEBUG=1 -I$(SRCROOT)/pexpert/qcom_usb_debug/include '
+        '-I$(SRCROOT)/pexpert/qcom_usb_debug -I$(SRCROOT)/pexpert/qcom_usb_debug/kernel',
+        'MakeInc.def XNU_QCOM_USB_DEBUG flags',
+    )
+
+    replace_exact(
+        xnu / 'pexpert/conf/files',
+        'pexpert/gen/kcformat.c\t\t\t\tstandard',
+        'pexpert/gen/kcformat.c\t\t\t\tstandard\n'
+        'pexpert/qcom_usb_debug/kernel/QcomXnuUsbDebug.c\t\tstandard\n'
+        'pexpert/qcom_usb_debug/kernel/QcomUsbScreenshot.c\tstandard\n'
+        'pexpert/qcom_usb_debug/usb/Dwc3.c\t\t\t\tstandard\n'
+        'pexpert/qcom_usb_debug/soc/QcomUsbQualify.c\t\t\tstandard\n'
+        'pexpert/qcom_usb_debug/soc/QcomUsbDmaDomain.c\t\tstandard\n'
+        'pexpert/qcom_usb_debug/Pclm10BootReset.c\t\t\tstandard',
+        'pexpert/conf/files QUD units',
+    )
+
+    qud_warn_suppress = (
+        '-Wno-reserved-identifier -Wno-pre-c11-compat -Wno-switch-default '
+        '-Wno-declaration-after-statement -Wno-missing-prototypes '
+        '-Wno-unsafe-buffer-usage -Wno-implicit-int-conversion -Wno-shorten-64-to-32'
+    )
+    replace_exact(
+        xnu / 'pexpert/conf/Makefile.template',
+        'pe_serial.o_CWARNFLAGS_ADD += -Wno-sign-conversion',
+        'pe_serial.o_CWARNFLAGS_ADD += -Wno-sign-conversion\n'
+        f'QcomXnuUsbDebug.o_CWARNFLAGS_ADD += {qud_warn_suppress}\n'
+        f'QcomUsbScreenshot.o_CWARNFLAGS_ADD += {qud_warn_suppress}\n'
+        f'Dwc3.o_CWARNFLAGS_ADD += {qud_warn_suppress}\n'
+        f'QcomUsbQualify.o_CWARNFLAGS_ADD += {qud_warn_suppress}\n'
+        f'QcomUsbDmaDomain.o_CWARNFLAGS_ADD += {qud_warn_suppress}\n'
+        f'Pclm10BootReset.o_CWARNFLAGS_ADD += {qud_warn_suppress}',
+        'pexpert/conf/Makefile.template QUD warn suppress',
+    )
+
+    # Console & kprintf hooks (preserving fbcon PE_kputc when serial_init succeeded)
+    pe_kprintf = xnu / 'pexpert/arm/pe_kprintf.c'
+    replace_exact(
+        pe_kprintf,
+        '#include <libkern/section_keywords.h>',
+        '#include <libkern/section_keywords.h>\n'
+        '#if XNU_QCOM_USB_DEBUG\n'
+        '#include <QcomXnuUsbDebug.h>\n'
+        '#endif',
+        'pe_kprintf.c include',
+    )
+    replace_exact(
+        pe_kprintf,
+        'static SIMPLE_LOCK_DECLARE(kprintf_lock, 0);',
+        '#if XNU_QCOM_USB_DEBUG\n'
+        'static bool qcom_usb_debug_kprintf_requested;\n'
+        'static void\n'
+        'qcom_usb_tee(char c)\n'
+        '{\n'
+        '\tif (PE_kputc == console_write_unbuffered) {\n'
+        '\t\tPE_kputc(c);\n'
+        '\t\treturn;\n'
+        '\t}\n'
+        '\tqcom_usb_debug_putc(c);\n'
+        '\tif (PE_kputc && PE_kputc != qcom_usb_debug_putc) {\n'
+        '\t\tPE_kputc(c);\n'
+        '\t}\n'
+        '}\n'
+        '#define QCOM_USB_DEBUG_KPRINTF_PUTC qcom_usb_tee\n'
+        '#else\n'
+        '#define QCOM_USB_DEBUG_KPRINTF_PUTC PE_kputc\n'
+        '#endif\n\n'
+        'static SIMPLE_LOCK_DECLARE(kprintf_lock, 0);',
+        'pe_kprintf.c tee helper',
+    )
+    replace_exact(
+        pe_kprintf,
+        '\tif (PE_parse_boot_argn("-enable_kprintf_spam", &enable_kprintf_spam, sizeof(enable_kprintf_spam))) {\n'
+        '\t\tdisable_kprintf_output = false;\n'
+        '\t}\n'
+        '#endif\n'
+        '}',
+        '\tif (PE_parse_boot_argn("-enable_kprintf_spam", &enable_kprintf_spam, sizeof(enable_kprintf_spam))) {\n'
+        '\t\tdisable_kprintf_output = false;\n'
+        '\t}\n'
+        '#endif\n'
+        '#if XNU_QCOM_USB_DEBUG\n'
+        '\tqcom_usb_debug_kprintf_requested = !disable_kprintf_output;\n'
+        '\tdisable_kprintf_output = true;\n'
+        '#endif\n'
+        '}',
+        'pe_kprintf.c defer spam',
+    )
+    replace_exact(
+        pe_kprintf,
+        '\t} else {\n'
+        '\t\t/**\n'
+        '\t\t * If serial failed to initialize then fall back to using the console,\n'
+        '\t\t * and assume the console is using the video console (because clearly\n'
+        '\t\t * serial doesn\'t work).\n'
+        '\t\t */\n'
+        '\t\tPE_kputc = console_write_unbuffered;\n'
+        '\t}\n'
+        '}',
+        '\t} else {\n'
+        '\t\t/**\n'
+        '\t\t * If serial failed to initialize then fall back to using the console,\n'
+        '\t\t * and assume the console is using the video console (because clearly\n'
+        '\t\t * serial doesn\'t work).\n'
+        '\t\t */\n'
+        '\t\tPE_kputc = console_write_unbuffered;\n'
+        '\t}\n'
+        '#if XNU_QCOM_USB_DEBUG\n'
+        '\tif (qcom_usb_debug_init() && !PE_kputc) {\n'
+        '\t\tPE_kputc = qcom_usb_debug_putc;\n'
+        '\t}\n'
+        '\tdisable_kprintf_output = !qcom_usb_debug_kprintf_requested;\n'
+        '#endif\n'
+        '}',
+        'pe_kprintf.c qcom_usb_debug_init',
+    )
+    replace_exact(
+        pe_kprintf,
+        '\t_doprnt_log(format, &listp, PE_kputc, 16);',
+        '\t_doprnt_log(format, &listp, QCOM_USB_DEBUG_KPRINTF_PUTC, 16);',
+        'pe_kprintf.c _kprintf sink',
+    )
+    replace_exact(
+        pe_kprintf,
+        '\t\t_doprnt_log(fmt, &listp, PE_kputc, 16);',
+        '\t\t_doprnt_log(fmt, &listp, QCOM_USB_DEBUG_KPRINTF_PUTC, 16);',
+        'pe_kprintf.c kprintf sink',
+    )
+
+    # debug.c panic prepare + drain (including panic_spin_shmcon and kdp_machine_reboot_type!)
+    debug_c = xnu / 'osfmk/kern/debug.c'
+    replace_exact(
+        debug_c,
+        'void\npanic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsigned int reason, void *ctx,',
+        '#if XNU_QCOM_USB_DEBUG\n#include <QcomXnuUsbDebug.h>\n#endif\n\n'
+        'void\npanic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsigned int reason, void *ctx,',
+        'debug.c QUD include',
+    )
+    replace_exact(
+        debug_c,
+        '#pragma clang diagnostic pop\n\n#if defined(SWEET)',
+        '#pragma clang diagnostic pop\n\n'
+        '#if XNU_QCOM_USB_DEBUG\n\tqcom_usb_debug_panic_prepare();\n#endif\n\n'
+        '#if defined(SWEET)',
+        'debug.c panic_prepare',
+    )
+    replace_exact(
+        debug_c,
+        '#if defined(SWEET)\n\t\textern void pclm10_panic_autoreset(void);\n\t\tpclm10_panic_autoreset();\n#endif\n\t\t/* If panic debugging is configured',
+        '#if XNU_QCOM_USB_DEBUG\n\t\tqcom_usb_debug_panic_drain();\n#endif\n'
+        '#if defined(SWEET)\n\t\textern void pclm10_panic_autoreset(void);\n\t\tpclm10_panic_autoreset();\n#endif\n\t\t/* If panic debugging is configured',
+        'debug.c panic_drain before shmcon',
+    )
+    replace_exact(
+        debug_c,
+        '\tif (!panicDebugging) {\n#if defined(SWEET)\n\t\textern void pclm10_panic_autoreset(void);\n\t\tpclm10_panic_autoreset();\n#endif\n\t\tkdp_machine_reboot_type(',
+        '\tif (!panicDebugging) {\n#if XNU_QCOM_USB_DEBUG\n\t\tqcom_usb_debug_panic_drain();\n#endif\n#if defined(SWEET)\n\t\textern void pclm10_panic_autoreset(void);\n\t\tpclm10_panic_autoreset();\n#endif\n\t\tkdp_machine_reboot_type(',
+        'debug.c panic_drain before reboot_type',
+    )
+    replace_exact(
+        debug_c,
+        'void\npanic_spin_forever(void)\n{\n#if defined(SWEET)\n\textern void pclm10_panic_autoreset(void);\n\tpclm10_panic_autoreset();\n#endif\n\tfor (;;) {',
+        'void\npanic_spin_forever(void)\n{\n#if XNU_QCOM_USB_DEBUG\n\tqcom_usb_debug_panic_drain();\n#endif\n#if defined(SWEET)\n\textern void pclm10_panic_autoreset(void);\n\tpclm10_panic_autoreset();\n#endif\n\tfor (;;) {',
+        'debug.c panic_drain before spin_forever',
+    )
+
+    # printf.c consdebug_putc / consdebug_putc_unbuffered
+    printf_c = xnu / 'osfmk/kern/printf.c'
+    replace_exact(
+        printf_c,
+        'void\nconsdebug_putc(char c)\n{\n',
+        '#if XNU_QCOM_USB_DEBUG\n#include <QcomXnuUsbDebug.h>\n#endif\n\nvoid\nconsdebug_putc(char c)\n{\n'
+        '#if XNU_QCOM_USB_DEBUG\n'
+        '\tconst bool usb_via_pe_console = !console_is_serial() && !disable_serial_output &&\n'
+        '\t    PE_kputc == console_write_unbuffered;\n'
+        '\tif (disableConsoleOutput && !usb_via_pe_console) {\n'
+        '\t\tqcom_usb_debug_putc(c);\n'
+        '\t}\n'
+        '\tif (!usb_via_pe_console)\n'
+        '#endif\n',
+        'printf.c consdebug_putc pre',
+    )
+    replace_exact(
+        printf_c,
+        '\tif (!console_is_serial() && !disable_serial_output) {\n\t\tPE_kputc(c);\n\t}\n}\n\nvoid\nconsdebug_putc_unbuffered(char c)\n{\n'
+        '\tif (!disableConsoleOutput) {\n\t\tconsole_write_unbuffered(c);\n\t}\n\n\tdebug_putc(c);\n\n'
+        '\tif (!console_is_serial() && !disable_serial_output) {\n\t\tPE_kputc(c);\n\t}',
+        '\tif (!console_is_serial() && !disable_serial_output) {\n'
+        '#if XNU_QCOM_USB_DEBUG\n\t\tif (PE_kputc && PE_kputc != qcom_usb_debug_putc)\n#endif\n'
+        '\t\tPE_kputc(c);\n\t}\n}\n\nvoid\nconsdebug_putc_unbuffered(char c)\n{\n'
+        '#if XNU_QCOM_USB_DEBUG\n'
+        '\tconst bool usb_via_pe_console = !console_is_serial() && !disable_serial_output &&\n'
+        '\t    PE_kputc == console_write_unbuffered;\n'
+        '\tif (disableConsoleOutput && !usb_via_pe_console) {\n'
+        '\t\tqcom_usb_debug_putc(c);\n'
+        '\t}\n'
+        '\tif (!usb_via_pe_console)\n'
+        '#endif\n'
+        '\tif (!disableConsoleOutput) {\n\t\tconsole_write_unbuffered(c);\n\t}\n\n\tdebug_putc(c);\n\n'
+        '\tif (!console_is_serial() && !disable_serial_output) {\n'
+        '#if XNU_QCOM_USB_DEBUG\n\t\tif (PE_kputc && PE_kputc != qcom_usb_debug_putc)\n#endif\n'
+        '\t\tPE_kputc(c);\n\t}',
+        'printf.c consdebug_putc_unbuffered',
+    )
+
+    # serial_console.c
+    serial_console = xnu / 'osfmk/console/serial_console.c'
+    replace_exact(
+        serial_console,
+        '#include <libkern/section_keywords.h>',
+        '#include <libkern/section_keywords.h>\n#if XNU_QCOM_USB_DEBUG\n#include <QcomXnuUsbDebug.h>\n#endif',
+        'serial_console.c include',
+    )
+    replace_exact(
+        serial_console,
+        'console_write(char *str, int size)\n{\n\tassert(str != NULL);',
+        'console_write(char *str, int size)\n{\n\tassert(str != NULL);\n\n'
+        '#if XNU_QCOM_USB_DEBUG\n'
+        '\tfor (int offset = 0; offset < size;) {\n'
+        '\t\tint bytes = size - offset;\n'
+        '\t\tif (bytes > 16384) {\n'
+        '\t\t\tbytes = 16384;\n'
+        '\t\t}\n'
+        '\t\t(void)qcom_usb_debug_write(str + offset, (size_t)bytes);\n'
+        '\t\toffset += bytes;\n'
+        '\t}\n'
+        '#endif',
+        'serial_console.c console_write',
+    )
+    replace_exact(
+        serial_console,
+        'console_write_unbuffered(char c)\n{\n\t_cnputc(c, true);',
+        'console_write_unbuffered(char c)\n{\n#if XNU_QCOM_USB_DEBUG\n\tqcom_usb_debug_putc(c);\n#endif\n\t_cnputc(c, true);',
+        'serial_console.c console_write_unbuffered',
+    )
+
+    # serial_general.c
+    replace_exact(
+        xnu / 'osfmk/console/serial_general.c',
+        '\t\tif (serialmode & SERIALMODE_SYNCDRAIN) {',
+        '#if !XNU_QCOM_USB_DEBUG\n\t\tif (serialmode & SERIALMODE_SYNCDRAIN)\n#endif\n\t\t{',
+        'serial_general.c syncdrain bypass',
+    )
+
+    # bsd/kern/bsd_init.c worker + autoreset + control REBOOT
+    bsd_init = xnu / 'bsd/kern/bsd_init.c'
+    replace_exact(
+        bsd_init,
+        '#include <kern/sched_hygiene.h>',
+        '#include <kern/sched_hygiene.h>\n'
+        '#if XNU_QCOM_USB_DEBUG\n'
+        '#include <QcomXnuUsbDebug.h>\n'
+        '#include <kern/cpu_number.h>\n'
+        '#include <kern/processor.h>\n'
+        '#include <kern/debug.h>\n'
+        '#endif',
+        'bsd_init.c QUD includes',
+    )
+    worker_code = '''#if XNU_QCOM_USB_DEBUG
+extern char pclm10_usb_persist_line[384];
+extern int boot_reset_bootloader(char *, unsigned);
+extern void pclm10_delay_ms(uint32_t ms);
+extern processor_t thread_bind(processor_t processor);
+extern void thread_terminate_self(void);
+
+static unsigned int qcom_usb_worker_state;
+static unsigned int qcom_usb_reboot_state;
+
+static void
+qcom_usb_worker_wait(void)
+{
+\tuint64_t deadline;
+\tclock_interval_to_deadline(5, NSEC_PER_MSEC, &deadline);
+\tif (assert_wait_deadline((event_t)&qcom_usb_worker_state,
+\t    THREAD_UNINT, deadline) == THREAD_WAITING) {
+\t\tthread_block(THREAD_CONTINUE_NULL);
+\t}
+}
+
+static void
+qcom_usb_reboot_worker(void *argument __unused, wait_result_t result __unused)
+{
+\tif (!qcom_usb_debug_control_arm_reboot()) {
+\t\t__atomic_store_n(&qcom_usb_reboot_state, 4u, __ATOMIC_RELEASE);
+\t\tqcom_usb_debug_control_reboot_failed(-4);
+\t\tthread_terminate_self();
+\t\treturn;
+\t}
+\tqcom_usb_debug_control_reset_now();
+\t__atomic_store_n(&qcom_usb_reboot_state, 4u, __ATOMIC_RELEASE);
+\tqcom_usb_debug_control_reboot_failed(-5);
+\tthread_terminate_self();
+}
+
+static void
+qcom_usb_start_reboot_once(void)
+{
+\tthread_t thread = THREAD_NULL;
+\tunsigned int state, running = 1u;
+\tkern_return_t kr;
+\tif (!qcom_usb_debug_control_take_reboot()) {
+\t\treturn;
+\t}
+\t(void)qcom_usb_debug_wait_drained(2000);
+\tfor (;;) {
+\t\tstate = __atomic_load_n(&qcom_usb_reboot_state, __ATOMIC_ACQUIRE);
+\t\tif (state != 0u && state != 3u && state != 4u) {
+\t\t\tqcom_usb_debug_control_reboot_failed(-6);
+\t\t\treturn;
+\t\t}
+\t\tif (__atomic_compare_exchange_n(&qcom_usb_reboot_state, &state, 1u,
+\t\t    0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+\t\t\tbreak;
+\t\t}
+\t}
+\tkr = kernel_thread_start(qcom_usb_reboot_worker, NULL, &thread);
+\tif (kr == KERN_SUCCESS) {
+\t\t(void)__atomic_compare_exchange_n(&qcom_usb_reboot_state, &running,
+\t\t    2u, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+\t\tthread_deallocate(thread);
+\t} else {
+\t\t__atomic_store_n(&qcom_usb_reboot_state, 3u, __ATOMIC_RELEASE);
+\t\tqcom_usb_debug_control_reboot_failed(kr);
+\t}
+}
+
+static void
+qcom_usb_worker(void *argument __unused, wait_result_t result __unused)
+{
+\tstruct qcom_usb_debug_status status = {0};
+\tprocessor_t processor = cpu_to_processor(master_cpu);
+\tint control_enabled = 0;
+\tint control_active = 0;
+\tunsigned int autoreset_sec = 0;
+\tunsigned int idle_ticks = 0;
+
+\tthread_set_thread_name(current_thread(), "qcom-usb-debug");
+\tif (processor == PROCESSOR_NULL) {
+\t\t__atomic_store_n(&qcom_usb_worker_state, 3u, __ATOMIC_RELEASE);
+\t\tgoto stopped;
+\t}
+\tthread_bind(processor);
+\tthread_block(THREAD_CONTINUE_NULL);
+\tif (cpu_number() != master_cpu) {
+\t\t__atomic_store_n(&qcom_usb_worker_state, 3u, __ATOMIC_RELEASE);
+\t\tgoto stopped;
+\t}
+
+\tqcom_usb_debug_get_status(&status);
+\tprintf("PCLM10 USB: %s (phase=%u err=%u qcom=%u dom=%u stg=%u lt=%u a=%x b=%x tr=%u)\\n",
+\t    pclm10_usb_persist_line[0] ? pclm10_usb_persist_line : "(empty)",
+\t    status.phase, status.error, status.qcom_result,
+\t    status.domain_result, status.domain_stage,
+\t    status.last_trace, status.trace_a, status.trace_b, status.traces);
+\t(void)PE_parse_boot_argn("pclm10-autoreset", &autoreset_sec, sizeof(autoreset_sec));
+\tif (status.phase != QCOM_USB_DEBUG_ACTIVE) {
+\t\tif (autoreset_sec > 0u) {
+\t\t\tunsigned int wait_sec = autoreset_sec < 8u ? autoreset_sec : 8u;
+\t\t\tchar rbuf[160];
+\t\t\tprintf("PCLM10 AUTORESET: QUD phase=%u err=%u; rebooting in %us\\n",
+\t\t\t    status.phase, status.error, wait_sec);
+\t\t\tpclm10_delay_ms(wait_sec * 1000u);
+\t\t\t(void)boot_reset_bootloader(rbuf, sizeof(rbuf));
+\t\t}
+\t\tgoto stopped;
+\t}
+\t__atomic_store_n(&qcom_usb_worker_state, 2u, __ATOMIC_RELEASE);
+\tkprintf("QCOM USB WORKER active cpu=%d period_ms=5 buffer=%llu\\n",
+\t    cpu_number(), status.buffer_capacity);
+\tif (PE_parse_boot_argn("qcom-usb-ctl", &control_enabled, sizeof(control_enabled)) &&
+\t    control_enabled == 1) {
+\t\tif (qcom_usb_debug_control_start()) {
+\t\t\tcontrol_active = 1;
+\t\t\tqcom_usb_debug_get_status(&status);
+\t\t\tkprintf("QCOM USB CONTROL active hook=%u\\n", status.control_hook_owned);
+\t\t}
+\t}
+\tfor (;;) {
+\t\tif (panic_active()) {
+\t\t\tbreak;
+\t\t}
+\t\tqcom_usb_debug_get_status(&status);
+\t\tif (status.phase != QCOM_USB_DEBUG_ACTIVE) {
+\t\t\tbreak;
+\t\t}
+\t\tqcom_usb_debug_poll();
+\t\tif (control_active) {
+\t\t\tqcom_usb_start_reboot_once();
+\t\t}
+\t\tif (autoreset_sec > 0u && status.control_replies == 0 &&
+\t\t    ++idle_ticks >= autoreset_sec * 200u) {
+\t\t\tchar rbuf[160];
+\t\t\tprintf("PCLM10 AUTORESET: no USB host after %us; rebooting to fastboot\\n", autoreset_sec);
+\t\t\t(void)boot_reset_bootloader(rbuf, sizeof(rbuf));
+\t\t\tbreak;
+\t\t}
+\t\tqcom_usb_worker_wait();
+\t}
+
+stopped:
+\tif (__atomic_load_n(&qcom_usb_worker_state, __ATOMIC_ACQUIRE) != 3u) {
+\t\t__atomic_store_n(&qcom_usb_worker_state, 4u, __ATOMIC_RELEASE);
+\t}
+\tthread_bind(PROCESSOR_NULL);
+\tthread_terminate_self();
+}
+
+static void
+qcom_usb_start_worker_once(void)
+{
+\tthread_t thread = THREAD_NULL;
+\tunsigned int expected = 0;
+\tint enabled = 0;
+\tkern_return_t result;
+
+\tif (!PE_parse_boot_argn("qcom-usb-debug", &enabled, sizeof(enabled)) || enabled != 1) {
+\t\treturn;
+\t}
+\tif (!__atomic_compare_exchange_n(&qcom_usb_worker_state, &expected, 1u,
+\t    0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+\t\treturn;
+\t}
+\tresult = kernel_thread_start(qcom_usb_worker, NULL, &thread);
+\tif (result == KERN_SUCCESS) {
+\t\tthread_deallocate(thread);
+\t} else {
+\t\t__atomic_store_n(&qcom_usb_worker_state, 3u, __ATOMIC_RELEASE);
+\t}
+}
+#endif /* XNU_QCOM_USB_DEBUG */
+
+kern_return_t
+bsd_autoconf(void)
+{
+\tkprintf("bsd_autoconf: calling kminit\\n");
+\tkminit();
+#if XNU_QCOM_USB_DEBUG
+\tqcom_usb_start_worker_once();
+#endif'''
+    replace_exact(
+        bsd_init,
+        'kern_return_t\nbsd_autoconf(void)\n{\n\tkprintf("bsd_autoconf: calling kminit\\n");\n\tkminit();',
+        worker_code,
+        'bsd_init.c bsd_autoconf QUD worker',
+    )
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--xnu', type=Path, required=True, help='Path to patched ios-sweet xnu tree')
+    p.add_argument('--qud-dir', type=Path, default=None, help='Prepared QcomXnuUsbDebug tree')
+    p.add_argument('--boot-reset-c', type=Path, default=None, help='Path to Pclm10BootReset.c')
     args = p.parse_args()
     apply_overlay(args.xnu)
+    if args.qud_dir is not None:
+        apply_qud_overlay(args.xnu, args.qud_dir, args.boot_reset_c)
+        print(f'Applied QcomXnuUsbDebug overlay cleanly onto {args.xnu}')
     return 0
 
 
