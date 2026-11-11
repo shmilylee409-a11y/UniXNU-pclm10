@@ -150,7 +150,7 @@ jobs:
           inject = (
               '            fi\n'
               '        done\n'
-              f'        python3 "{overlay}" --xnu "${{WORK_DIR}}/xnu" --qud-dir "{qud_dir}" --boot-reset-c "{boot_reset}"\n'
+              '        python3 "' + overlay + '" --xnu "${WORK_DIR}/xnu" --qud-dir "' + qud_dir + '" --boot-reset-c "' + boot_reset + '"\n'
               '        cd "${WORK_DIR}"\n'
               '    fi'
           )
