@@ -1823,6 +1823,218 @@ def apply_overlay(xnu: Path) -> None:
             'rpc.replySize = ((uint32_t) (sizeof(buffer.buffer) - inSize));    // inSize was checked\n\trpc.kernelContent = message;',
             'IOUserServer rpc kernelContent',
         )
+
+    # 8. Optional pclm10-ram-mb boot-arg to expand XNU DRAM window across DDR Bank 1+2 (>768 MiB)
+    replace_exact(
+        xnu / 'osfmk/arm/arm_init.c',
+        '\t{\n\t\t/*\n\t\t * Select the advertised kernel page size.\n\t\t */',
+        '\t{\n'
+        '\t\tuint32_t pclm10_ram_mb = 0;\n'
+        '\t\tif (PE_parse_boot_argn("pclm10-ram-mb", &pclm10_ram_mb, sizeof(pclm10_ram_mb)) &&\n'
+        '\t\t    pclm10_ram_mb >= 512 && pclm10_ram_mb <= 2816) {\n'
+        '\t\t\tuint64_t new_sz = (uint64_t)pclm10_ram_mb << 20;\n'
+        '\t\t\tconst uint64_t top_limit = 0x17E000000ULL;\n'
+        '\t\t\tif (args->physBase < top_limit && args->physBase + new_sz > top_limit) {\n'
+        '\t\t\t\tnew_sz = (top_limit - args->physBase) & ~0x1fffffULL;\n'
+        '\t\t\t}\n'
+        '\t\t\tif (new_sz > args->memSize) {\n'
+        '\t\t\t\targs->memSize = new_sz;\n'
+        '\t\t\t\targs->memSizeActual = new_sz;\n'
+        '\t\t\t}\n'
+        '\t\t}\n'
+        '\t}\n'
+        '\t{\n\t\t/*\n\t\t * Select the advertised kernel page size.\n\t\t */',
+        'arm_init.c add pclm10-ram-mb multi-GB DRAM expansion',
+    )
+
+    # 9. Allow PM8150B (SPMI SID 2) in sweet_spmi.c and add BQ27541 SE1 (GPIO 114/115) telemetry to SweetBattery
+    replace_exact(
+        xnu / 'bsd/dev/sweet_spmi.c',
+        '\tif (!sp_ready || !out || sid != 0 || addr > 0xffffu ||\n'
+        '\t    (peripheral != 0x10 && peripheral != 0x11 && peripheral != 0x12 &&\n'
+        '\t    peripheral != 0x13 && peripheral != 0x48)) {',
+        '\tif (!sp_ready || !out || (sid != 0 && sid != 2) || addr > 0xffffu ||\n'
+        '\t    (peripheral != 0x10 && peripheral != 0x11 && peripheral != 0x12 &&\n'
+        '\t    peripheral != 0x13 && peripheral != 0x40 && peripheral != 0x48)) {',
+        'sweet_spmi.c allow PM8150B SID 2 SMB5/FG reads',
+    )
+    replace_exact(
+        xnu / 'iokit/Kernel/arm/SweetBattery.cpp',
+        'extern "C" int sweet_spmi_init(void);\nextern "C" int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out);',
+        'extern "C" int sweet_spmi_init(void);\nextern "C" int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out);\n'
+        'extern "C" vm_offset_t ml_io_map(vm_offset_t, vm_size_t);\n\n'
+        'static vm_offset_t bq_gpio;\n\n'
+        'static inline uint32_t\n'
+        'bq_rd(uint32_t off)\n'
+        '{\n'
+        '\tuint32_t v = *(volatile uint32_t *)(bq_gpio + off);\n'
+        '\t__asm__ volatile("dmb oshld" ::: "memory");\n'
+        '\treturn v;\n'
+        '}\n\n'
+        'static inline void\n'
+        'bq_wr(uint32_t off, uint32_t v)\n'
+        '{\n'
+        '\t__asm__ volatile("dmb oshst" ::: "memory");\n'
+        '\t*(volatile uint32_t *)(bq_gpio + off) = v;\n'
+        '\t__asm__ volatile("dsb osh" ::: "memory");\n'
+        '}\n\n'
+        'static void\n'
+        'bq_pin(unsigned pin, bool drive_low)\n'
+        '{\n'
+        '\tuint32_t off = 0x1000u * pin;\n'
+        '\tuint32_t cfg = bq_rd(off);\n'
+        '\tif (drive_low) {\n'
+        '\t\tbq_wr(off + 4u, bq_rd(off + 4u) & ~2u);\n'
+        '\t\tcfg = (cfg & ~0x3ffu) | (1u << 6) | 0x200u;\n'
+        '\t} else {\n'
+        '\t\tcfg = (cfg & ~0x3ffu) | (1u << 6);\n'
+        '\t}\n'
+        '\tbq_wr(off, cfg);\n'
+        '}\n\n'
+        'static bool\n'
+        'bq_scl_hi(void)\n'
+        '{\n'
+        '\tbq_pin(115u, false);\n'
+        '\tfor (unsigned i = 0; i < 500u; ++i) {\n'
+        '\t\tif (bq_rd(0x1000u * 115u + 4u) & 1u) {\n'
+        '\t\t\tIODelay(4);\n'
+        '\t\t\treturn true;\n'
+        '\t\t}\n'
+        '\t\tIODelay(1);\n'
+        '\t}\n'
+        '\treturn false;\n'
+        '}\n\n'
+        'static void\n'
+        'bq_stop(void)\n'
+        '{\n'
+        '\tbq_pin(114u, true);\n'
+        '\tIODelay(3);\n'
+        '\t(void)bq_scl_hi();\n'
+        '\tbq_pin(114u, false);\n'
+        '\tIODelay(4);\n'
+        '}\n\n'
+        'static bool\n'
+        'bq_tx(uint8_t byte)\n'
+        '{\n'
+        '\tfor (int bit = 7; bit >= 0; --bit) {\n'
+        '\t\tbq_pin(114u, ((byte >> bit) & 1u) == 0);\n'
+        '\t\tIODelay(3);\n'
+        '\t\tif (!bq_scl_hi()) {\n'
+        '\t\t\treturn false;\n'
+        '\t\t}\n'
+        '\t\tbq_pin(115u, true);\n'
+        '\t\tIODelay(2);\n'
+        '\t}\n'
+        '\tbq_pin(114u, false);\n'
+        '\tIODelay(3);\n'
+        '\tif (!bq_scl_hi()) {\n'
+        '\t\treturn false;\n'
+        '\t}\n'
+        '\tbool ack = (bq_rd(0x1000u * 114u + 4u) & 1u) == 0;\n'
+        '\tbq_pin(115u, true);\n'
+        '\tIODelay(2);\n'
+        '\treturn ack;\n'
+        '}\n\n'
+        'static bool\n'
+        'bq_rx(bool ack, uint8_t *out)\n'
+        '{\n'
+        '\tuint8_t v = 0;\n'
+        '\tbq_pin(114u, false);\n'
+        '\tfor (int bit = 7; bit >= 0; --bit) {\n'
+        '\t\tIODelay(3);\n'
+        '\t\tif (!bq_scl_hi()) {\n'
+        '\t\t\treturn false;\n'
+        '\t\t}\n'
+        '\t\tif (bq_rd(0x1000u * 114u + 4u) & 1u) {\n'
+        '\t\t\tv |= (uint8_t)(1u << bit);\n'
+        '\t\t}\n'
+        '\t\tbq_pin(115u, true);\n'
+        '\t\tIODelay(2);\n'
+        '\t}\n'
+        '\tbq_pin(114u, ack);\n'
+        '\tIODelay(3);\n'
+        '\tif (!bq_scl_hi()) {\n'
+        '\t\treturn false;\n'
+        '\t}\n'
+        '\tbq_pin(115u, true);\n'
+        '\tIODelay(2);\n'
+        '\tbq_pin(114u, false);\n'
+        '\t*out = v;\n'
+        '\treturn true;\n'
+        '}\n\n'
+        'static bool\n'
+        'bq_read_word(uint8_t reg, uint16_t *out)\n'
+        '{\n'
+        '\tif (!bq_gpio) {\n'
+        '\t\tbq_gpio = ml_io_map(0x03d00000u, 0x80000u);\n'
+        '\t\tif (!bq_gpio) {\n'
+        '\t\t\treturn false;\n'
+        '\t\t}\n'
+        '\t}\n'
+        '\tbq_pin(114u, false);\n'
+        '\tbq_pin(115u, false);\n'
+        '\tIODelay(4);\n'
+        '\tif (!(bq_rd(0x1000u * 114u + 4u) & 1u) || !(bq_rd(0x1000u * 115u + 4u) & 1u)) {\n'
+        '\t\treturn false;\n'
+        '\t}\n'
+        '\tbq_pin(114u, true);\n'
+        '\tIODelay(4);\n'
+        '\tbq_pin(115u, true);\n'
+        '\tIODelay(2);\n'
+        '\tif (!bq_tx(0x55u << 1) || !bq_tx(reg)) {\n'
+        '\t\tbq_stop();\n'
+        '\t\treturn false;\n'
+        '\t}\n'
+        '\tbq_pin(114u, false);\n'
+        '\tIODelay(3);\n'
+        '\tif (!bq_scl_hi()) {\n'
+        '\t\tbq_stop();\n'
+        '\t\treturn false;\n'
+        '\t}\n'
+        '\tbq_pin(114u, true);\n'
+        '\tIODelay(4);\n'
+        '\tbq_pin(115u, true);\n'
+        '\tIODelay(2);\n'
+        '\tuint8_t lo = 0, hi = 0;\n'
+        '\tif (!bq_tx((0x55u << 1) | 1u) || !bq_rx(true, &lo) || !bq_rx(false, &hi)) {\n'
+        '\t\tbq_stop();\n'
+        '\t\treturn false;\n'
+        '\t}\n'
+        '\tbq_stop();\n'
+        '\t*out = (uint16_t)lo | ((uint16_t)hi << 8);\n'
+        '\treturn true;\n'
+        '}',
+        'SweetBattery.cpp add TLMM GPIO 114/115 BQ27541 reader',
+    )
+    replace_exact(
+        xnu / 'iokit/Kernel/arm/SweetBattery.cpp',
+        'void\nSweetBattery::poll(void)\n{\n\tuint8_t type, present, usb, path, charger, error, temperature;\n\tuint16_t rawVoltage;',
+        'void\nSweetBattery::poll(void)\n{\n'
+        '\tif (fReal) {\n'
+        '\t\tuint16_t raw_mv = 0, raw_soc = 0, raw_ma = 0;\n'
+        '\t\tif (bq_read_word(0x08u, &raw_mv) && bq_read_word(0x2cu, &raw_soc) &&\n'
+        '\t\t    raw_soc <= 100u && raw_mv >= 2500u && raw_mv <= 9500u) {\n'
+        '\t\t\tunsigned mv = raw_mv > 5500u ? (raw_mv / 2u) : raw_mv;\n'
+        '\t\t\tbool cur_ok = bq_read_word(0x14u, &raw_ma);\n'
+        '\t\t\tint ma = cur_ok ? (int)(int16_t)raw_ma : 0;\n'
+        '\t\t\tuint8_t usb2 = 0, path2 = 0, chg2 = 0, err2 = 0, temp2 = 0;\n'
+        '\t\t\tbool smb_ok = !sweet_spmi_read(2, 0x1310, &usb2) &&\n'
+        '\t\t\t    !sweet_spmi_read(2, 0x110b, &path2) &&\n'
+        '\t\t\t    !sweet_spmi_read(2, 0x1006, &chg2) &&\n'
+        '\t\t\t    !sweet_spmi_read(2, 0x1007, &err2) &&\n'
+        '\t\t\t    !sweet_spmi_read(2, 0x100d, &temp2);\n'
+        '\t\t\tbool ext = smb_ok ? ((usb2 & 0x10u) != 0) : (ma > 0);\n'
+        '\t\t\tbool cap = smb_ok ? (ext && (path2 & 0x10u) && (path2 & 1u) && !(path2 & 0x40u)) : ext;\n'
+        '\t\t\tunsigned st2 = chg2 & 7u;\n'
+        '\t\t\tbool chg = smb_ok ? (cap && st2 >= 1 && st2 <= 4 && !(err2 & 2u) && !(temp2 & 0x0cu)) : (ma > 0);\n'
+        '\t\t\tbool full = smb_ok ? (ext && st2 == 5 && !(err2 & 2u)) : (raw_soc == 100u);\n'
+        '\t\t\tpublish(raw_soc, mv, ma, ext, cap, chg, full, true, cur_ok);\n'
+        '\t\t\treturn;\n'
+        '\t\t}\n'
+        '\t}\n'
+        '\tuint8_t type, present, usb, path, charger, error, temperature;\n\tuint16_t rawVoltage;',
+        'SweetBattery.cpp poll BQ27541 + PM8150B before fallback',
+    )
     print(f'Applied PCLM10 SM8150 overlay cleanly onto {xnu}')
 
 
@@ -2298,6 +2510,31 @@ bsd_autoconf(void)
         'kern_return_t\nbsd_autoconf(void)\n{\n\tkprintf("bsd_autoconf: calling kminit\\n");\n\tkminit();',
         worker_code,
         'bsd_init.c bsd_autoconf QUD worker',
+    )
+
+    fb_cpp = xnu / 'iokit/Kernel/arm/SweetFramebuffer.cpp'
+    replace_exact(
+        fb_cpp,
+        '#include <sys/proc.h>\n',
+        '#include <sys/proc.h>\n#include <QcomUsbScreenshot.h>\n',
+        'SweetFramebuffer.cpp QcomUsbScreenshot.h include',
+    )
+    replace_exact(
+        fb_cpp,
+        '\tfVsync->setTimeoutUS(SWEET_FB_VSYNC_US);\n',
+        '\tfVsync->setTimeoutUS(SWEET_FB_VSYNC_US);\n'
+        '\t{\n'
+        '\t\tstruct qcom_usb_framebuffer qud_fb = {};\n'
+        '\t\tqud_fb.pixels = (const volatile uint8_t *)fPixels;\n'
+        '\t\tqud_fb.bytes = (size_t)fHeight * fRowBytes;\n'
+        '\t\tqud_fb.width = fWidth;\n'
+        '\t\tqud_fb.height = fHeight;\n'
+        '\t\tqud_fb.stride = fRowBytes;\n'
+        '\t\tqud_fb.format = QCOM_USB_BGRA8888;\n'
+        '\t\tIOLog("SWEET FB: usb screenshot reg=%d\\n",\n'
+        '\t\t    qcom_usb_debug_register_framebuffer(&qud_fb));\n'
+        '\t}\n',
+        'SweetFramebuffer.cpp register QUD framebuffer screenshot',
     )
 
 
