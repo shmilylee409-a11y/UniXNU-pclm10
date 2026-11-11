@@ -638,6 +638,45 @@ def apply_overlay(xnu: Path) -> None:
         "    \"     'IONameMatch'     = 'oppo,pclm10';\"\n",
         'KernelConfigTables match oppo,pclm10',
     )
+
+    # 8. Xcode 16 iig compatibility for xnu-8796 (adds kernelContent to struct IORPC)
+    old_iorpc = (
+        'struct IORPC {\n'
+        '\tIORPCMessageMach * message;\n'
+        '\tIORPCMessageMach * reply;\n'
+        '\tuint32_t           sendSize;\n'
+        '\tuint32_t           replySize;\n'
+        '};'
+    )
+    new_iorpc = (
+        'struct IORPC {\n'
+        '\tIORPCMessageMach * message;\n'
+        '\tIORPCMessageMach * reply;\n'
+        '\tuint32_t           sendSize;\n'
+        '\tuint32_t           replySize;\n'
+        '#ifdef KERNEL\n'
+        '\tIORPCMessage     * kernelContent;\n'
+        '#endif /* KERNEL */\n'
+        '};'
+    )
+    for rel in ('iokit/DriverKit/IORPC.h', 'iokit/IOKit/IORPC.h'):
+        p = xnu / rel
+        if 'kernelContent' not in p.read_text(encoding='utf-8'):
+            replace_exact(p, old_iorpc, new_iorpc, f'{rel} IORPC.kernelContent')
+    iouserserver = xnu / 'iokit/Kernel/IOUserServer.cpp'
+    if '.kernelContent = message' not in iouserserver.read_text(encoding='utf-8'):
+        replace_exact(
+            iouserserver,
+            'IORPC rpc = { .message = msgin, .reply = msgout, .sendSize = msgin->msgh.msgh_size, .replySize = replyAlloc };',
+            'IORPC rpc = { .message = msgin, .reply = msgout, .sendSize = msgin->msgh.msgh_size, .replySize = replyAlloc, .kernelContent = message };',
+            'IOUserServer kernelDispatch kernelContent',
+        )
+        replace_exact(
+            iouserserver,
+            'rpc.replySize = ((uint32_t) (sizeof(buffer.buffer) - inSize));    // inSize was checked',
+            'rpc.replySize = ((uint32_t) (sizeof(buffer.buffer) - inSize));    // inSize was checked\n\trpc.kernelContent = message;',
+            'IOUserServer rpc kernelContent',
+        )
     print(f'Applied PCLM10 SM8150 overlay cleanly onto {xnu}')
 
 

@@ -31,7 +31,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: UniXNU/UniXNU
-          ref: 95ad7812c464f8a4c5e4120c993c3be3cc72e0fd
+          ref: 95ad78129203442c3c14c02336303adbddf8d0a3
           path: UniXNU
 
       - name: init UniXNU submodules
@@ -100,7 +100,7 @@ jobs:
 
   xnu:
     if: ${{ inputs.build_xnu != false }}
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 120
     env:
       SWEET_SHA: 45263bee51df4a0f55cdf9c649af886399488ddb
