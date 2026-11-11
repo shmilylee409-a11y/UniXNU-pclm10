@@ -1051,7 +1051,8 @@ def apply_overlay(xnu: Path) -> None:
     replace_exact(
         sweet_touch,
         '\tconst uint32_t branches[] = {0x18004, 0x18008, 0x1800c, 0x18010, 0x18144};',
-        '\tconst uint32_t branches[] = {0x1e004, 0x1e008, 0x1e144};',
+        '\t/* Skip 0x1e008 (wrap2 s_ahb): hwcg_bit=1 keeps CLK_OFF set when idle (0x80000002). */\n'
+        '\tconst uint32_t branches[] = {0x1e004, 0x1e144};',
         'sweet_touch.c GCC wrap2 branch halt regs',
     )
     replace_exact(
