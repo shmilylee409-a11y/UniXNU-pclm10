@@ -21,6 +21,8 @@ FB_W, FB_H, FB_STRIDE = 1080, 2400, 1080 * 4
 UFS, UFS_SIZE = 0x01d84000, 0x3000
 TIMEBASE = 19200000
 VTIMER_INTID = 19
+PANIC_LOG_BASE = 0xDF000000
+PANIC_LOG_SIZE = 0x100000
 PCLM10_ECID = 0x50434C4D31300001  # 'PCLM10' + 1
 
 BOOT_MANIFEST_HASH = hashlib.sha384(b"pclm10 sweet boot manifest").digest()
@@ -73,6 +75,7 @@ def build(
         ("dram-size", u64(dram_size)),
         ("random-seed", seed),
         ("debug-enabled", u32(1)),
+        ("embedded-panic-log-size", u32(PANIC_LOG_SIZE)),
         ("firmware-version", cstr("pclm10-sweet-uefi")),
         ("system-firmware-version", cstr("pclm10-sweet-uefi")),
         ("boot-manifest-hash", BOOT_MANIFEST_HASH),
@@ -198,6 +201,7 @@ def build(
     )
     product_props = d22ap_product(d22ap_adt)
     product = [node("product", [ph()] + product_props)] if product_props else []
+    pram = node("pram", [ph(), ("reg", u64(PANIC_LOG_BASE, PANIC_LOG_SIZE))])
 
     return node(
         "device-tree",
@@ -218,7 +222,7 @@ def build(
             ("#address-cells", u32(2)),
             ("#size-cells", u32(2)),
         ],
-        [chosen, defaults, cpus, arm_io, fbcon, buttons] + product + [ufs],
+        [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + product + [ufs],
     )
 
 

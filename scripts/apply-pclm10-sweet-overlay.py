@@ -35,6 +35,7 @@ void pclm10_reset_premap(void);
 int pclm10_boot_reset_bootloader(void);
 void pclm10_panic_autoreset(void);
 void pclm10_watchdog_start(void);
+void pclm10_smmu_bypass_stream(uint32_t stream);
 
 enum {
 	BR_IMEM_BASE          = 0x146bf000u,
@@ -281,10 +282,15 @@ pclm10_boot_reset_bootloader(void)
 void
 pclm10_panic_autoreset(void)
 {
+	static bool running;
 	unsigned int sec = 0;
 	if (!PE_parse_boot_argn("pclm10-panic-reset", &sec, sizeof(sec)) || sec == 0) {
 		return;
 	}
+	if (running) {
+		return;
+	}
+	running = true;
 	if (sec > 30u) {
 		sec = 30u;
 	}
@@ -403,23 +409,17 @@ pclm10_watchdog_start(void)
 		thread_deallocate(thread);
 	}
 }
-#endif /* ARM64_BOARD_CONFIG_SWEET */
-'''
 
-SMMU_HELPER = r'''/*
- * SM8150 apps_smmu (0x15000000): UEFI leaves UFS stream 0x300 unmapped/faulting
- * until a bypass Context Bank is assigned (verified on PCLM10).
- */
-static void
-pclm10_ufs_smmu_bypass(void)
+void
+pclm10_smmu_bypass_stream(uint32_t stream)
 {
-	uint32_t stream = 0x300u;
-	PE_parse_boot_argn("ufsstream", &stream, sizeof(stream));
+	static vm_offset_t smmu;
 	stream &= 0x7fffu;
-
-	vm_offset_t smmu = ml_io_map(0x15000000ULL, 0xd0000u);
 	if (smmu == 0) {
-		printf("PCLM10 UFS: SMMU map failed\n");
+		smmu = ml_io_map(0x15000000ULL, 0xd0000u);
+	}
+	if (smmu == 0) {
+		printf("PCLM10 SMMU: map failed for stream=0x%x\n", stream);
 		return;
 	}
 	uint32_t idr0 = *(volatile uint32_t *)(smmu + 0x20);
@@ -467,7 +467,7 @@ pclm10_ufs_smmu_bypass(void)
 		}
 	}
 	if (slot == 0xffffu || bank == 0xffffu) {
-		printf("PCLM10 UFS: SMMU no free slot/bank stream=0x%x\n", stream);
+		printf("PCLM10 SMMU: no free slot/bank stream=0x%x\n", stream);
 		return;
 	}
 	vm_offset_t cb = smmu + (vm_offset_t)(pages + bank) * 4096u;
@@ -479,11 +479,12 @@ pclm10_ufs_smmu_bypass(void)
 	__asm__ volatile("dsb sy" ::: "memory");
 	*(volatile uint32_t *)(smmu + 0x800u + 4u * slot) = 0x80000000u | stream;
 	__asm__ volatile("dsb sy; isb" ::: "memory");
-	printf("PCLM10 UFS: SMMU stream 0x%x -> slot=%u bank=%u cbar=0x%08x sctlr=0x%08x\n",
+	printf("PCLM10 SMMU: stream 0x%x -> slot=%u bank=%u cbar=0x%08x sctlr=0x%08x\n",
 	    stream, slot, bank,
 	    *(volatile uint32_t *)(smmu + 0x1000u + 4u * bank),
 	    *(volatile uint32_t *)(cb + 0x0));
 }
+#endif /* ARM64_BOARD_CONFIG_SWEET */
 '''
 
 
@@ -516,12 +517,24 @@ def apply_overlay(xnu: Path) -> None:
         'arm_vm_init sweet_early_relocate',
     )
 
-    # 2. Pre-map PCLM10 reset registers in arm_init & add panic_spin_forever autoreset hook
+    # 2. Pre-map PCLM10 reset registers immediately after arm_vm_init & hook ALL panic stop paths
     replace_exact(
         xnu / 'osfmk/arm/arm_init.c',
-        'const unsigned int serial_exists = serial_init();',
-        'const unsigned int serial_exists = serial_init();\n#if defined(SWEET)\n\textern void pclm10_reset_premap(void);\n\tpclm10_reset_premap();\n#endif',
+        '\tarm_vm_init(xmaxmem, args);',
+        '\tarm_vm_init(xmaxmem, args);\n#if defined(SWEET)\n\textern void pclm10_reset_premap(void);\n\tpclm10_reset_premap();\n#endif',
         'arm_init pclm10_reset_premap',
+    )
+    replace_exact(
+        xnu / 'osfmk/kern/debug.c',
+        '\t\t/* If panic debugging is configured and we\'re on a dev fused device, spin for astris to connect */\n\t\tpanic_spin_shmcon();',
+        '#if defined(SWEET)\n\t\textern void pclm10_panic_autoreset(void);\n\t\tpclm10_panic_autoreset();\n#endif\n\t\t/* If panic debugging is configured and we\'re on a dev fused device, spin for astris to connect */\n\t\tpanic_spin_shmcon();',
+        'debug.c panic_spin_shmcon hook',
+    )
+    replace_exact(
+        xnu / 'osfmk/kern/debug.c',
+        '\tif (!panicDebugging) {\n\t\tkdp_machine_reboot_type(kPEPanicRestartCPU, debugger_panic_options);\n\t}',
+        '\tif (!panicDebugging) {\n#if defined(SWEET)\n\t\textern void pclm10_panic_autoreset(void);\n\t\tpclm10_panic_autoreset();\n#endif\n\t\tkdp_machine_reboot_type(kPEPanicRestartCPU, debugger_panic_options);\n\t}',
+        'debug.c kdp_machine_reboot_type hook',
     )
     replace_exact(
         xnu / 'osfmk/kern/debug.c',
@@ -550,8 +563,14 @@ def apply_overlay(xnu: Path) -> None:
     replace_exact(
         sweet_usb,
         'void sweet_usb_probe(void);',
-        'void sweet_usb_probe(void);\nuint64_t sweet_usb_rx_count(void);\nstatic bool pclm10_usb_probed;',
+        'void sweet_usb_probe(void);\nuint64_t sweet_usb_rx_count(void);\nextern void pclm10_smmu_bypass_stream(uint32_t stream);\nstatic bool pclm10_usb_probed;',
         'sweet_usb.c declarations',
+    )
+    replace_exact(
+        sweet_usb,
+        '\tif (enabled >= 2) {\n\t\tsweet_usb_gadget_start(dwc);\n\t}',
+        '\tif (enabled >= 2) {\n\t\tuint32_t usb_stream = 0x140u;\n\t\tPE_parse_boot_argn("usbstream", &usb_stream, sizeof(usb_stream));\n\t\tpclm10_smmu_bypass_stream(usb_stream);\n\t\tsweet_usb_gadget_start(dwc);\n\t}',
+        'sweet_usb.c SMMU stream 0x140 bypass',
     )
     replace_exact(
         sweet_usb,
@@ -602,13 +621,13 @@ def apply_overlay(xnu: Path) -> None:
     replace_exact(
         sweet_ufs,
         'static int\nufs_take_over_host(void)',
-        SMMU_HELPER + '\nstatic int\nufs_take_over_host(void)',
-        'sweet_ufs.c SMMU helper',
+        'extern void pclm10_smmu_bypass_stream(uint32_t stream);\n\nstatic int\nufs_take_over_host(void)',
+        'sweet_ufs.c SMMU declaration',
     )
     replace_exact(
         sweet_ufs,
         '\tlck_mtx_lock(&sweet_ufs_lock);\n\terror = ufs_take_over_host();',
-        '\tpclm10_ufs_smmu_bypass();\n\tlck_mtx_lock(&sweet_ufs_lock);\n\terror = ufs_take_over_host();',
+        '\t{\n\t\tuint32_t ufs_stream = 0x300u;\n\t\tPE_parse_boot_argn("ufsstream", &ufs_stream, sizeof(ufs_stream));\n\t\tpclm10_smmu_bypass_stream(ufs_stream);\n\t}\n\tlck_mtx_lock(&sweet_ufs_lock);\n\terror = ufs_take_over_host();',
         'sweet_ufs.c call SMMU bypass',
     )
     replace_exact(

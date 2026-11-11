@@ -13,13 +13,123 @@ from pathlib import Path
 SCRIPTS_DIR = Path(__file__).resolve().parent
 ROOT = SCRIPTS_DIR.parent
 
+LC_SEGMENT_64 = 0x19
+LC_UNIXTHREAD = 0x5
+LC_DYLD_CHAINED_FIXUPS = 0x80000034
+
+
+def parse_macho(buf: bytearray | bytes) -> dict:
+    magic, cputype, cpusub, _ftype, ncmds, _sizeofcmds, _flags, _ = struct.unpack_from("<8I", buf, 0)
+    if magic != 0xFEEDFACF:
+        raise SystemExit(f"expected 64-bit Mach-O kernel, got magic=0x{magic:x}")
+    segs = []
+    entry = None
+    fixups = None
+    off = 32
+    for _ in range(ncmds):
+        cmd, size = struct.unpack_from("<II", buf, off)
+        if cmd == LC_SEGMENT_64:
+            name = buf[off + 8 : off + 24].split(b"\0")[0].decode("ascii", errors="replace")
+            vmaddr, vmsize, fileoff, filesize = struct.unpack_from("<4Q", buf, off + 24)
+            segs.append(
+                {
+                    "name": name,
+                    "vmaddr": vmaddr,
+                    "vmsize": vmsize,
+                    "fileoff": fileoff,
+                    "filesize": filesize,
+                }
+            )
+        elif cmd == LC_UNIXTHREAD:
+            entry = struct.unpack_from("<Q", buf, off + 16 + 32 * 8)[0]
+        elif cmd == LC_DYLD_CHAINED_FIXUPS:
+            fixups = struct.unpack_from("<II", buf, off + 8)
+        off += size
+    return {"cputype": cputype, "cpusub": cpusub & 0xFF, "segs": segs, "entry": entry, "fixups": fixups}
+
+
+def decode_chained_ptr(raw: int, fmt: int, image_base: int) -> tuple[int, int, int]:
+    """Return (unslid target VA, next delta, stride) for one LC_DYLD_CHAINED_FIXUPS entry."""
+    if fmt in (2, 6):  # DYLD_CHAINED_PTR_64 / DYLD_CHAINED_PTR_64_OFFSET
+        if raw >> 63:
+            raise SystemExit("unexpected bind in kernel chained fixups")
+        target = raw & ((1 << 36) - 1)
+        high8 = (raw >> 36) & 0xFF
+        nxt = (raw >> 51) & 0xFFF
+        if fmt == 6:
+            target += image_base
+        return target | (high8 << 56), nxt, 4
+    if fmt == 8:  # DYLD_CHAINED_PTR_64_KERNEL_CACHE
+        target = raw & ((1 << 30) - 1)
+        nxt = (raw >> 51) & 0xFFF
+        return image_base + target, nxt, 4
+    if fmt in (1, 7, 9, 12):
+        auth = raw >> 63
+        nxt = (raw >> 51) & 0x7FF
+        stride = 4 if fmt in (7, 12) else 8
+        if auth:
+            target = raw & 0xFFFFFFFF
+        else:
+            target = raw & ((1 << 43) - 1)
+            target |= ((raw >> 43) & 0xFF) << 56
+        if fmt in (7, 9, 12) or auth:
+            target += image_base
+        return target, nxt, stride
+    raise SystemExit(f"unsupported chained pointer format {fmt}")
+
+
+def apply_chained_fixups(buf: bytearray, macho: dict) -> int:
+    """Rewrite LC_DYLD_CHAINED_FIXUPS chains in-place to plain unslid kernel VAs for DarwinBoot."""
+    if not macho["fixups"]:
+        return 0
+    data_off, _ = macho["fixups"]
+    _, starts_off, _, _, imports_count, _, _ = struct.unpack_from("<7I", buf, data_off)
+    if imports_count != 0:
+        raise SystemExit(f"kernel has {imports_count} imports; only rebases supported")
+    image_base = macho["segs"][0]["vmaddr"]
+    seg_count = struct.unpack_from("<I", buf, data_off + starts_off)[0]
+    nfix = 0
+    for i in range(seg_count):
+        seg_info = struct.unpack_from("<I", buf, data_off + starts_off + 4 + 4 * i)[0]
+        if not seg_info:
+            continue
+        base = data_off + starts_off + seg_info
+        _size, page_size, fmt, _seg_offset, _max_valid, page_count = struct.unpack_from("<IHHQIH", buf, base)
+        starts = struct.unpack_from(f"<{page_count}H", buf, base + 22)
+        seg = macho["segs"][i]
+        for p, start in enumerate(starts):
+            if start == 0xFFFF:
+                continue
+            if start & 0x8000:
+                raise SystemExit("DYLD_CHAINED_PTR_START_MULTI not supported")
+            loc = seg["fileoff"] + p * page_size + start
+            while True:
+                raw = struct.unpack_from("<Q", buf, loc)[0]
+                target, nxt, stride = decode_chained_ptr(raw, fmt, image_base)
+                struct.pack_into("<Q", buf, loc, target)
+                nfix += 1
+                if not nxt:
+                    break
+                loc += nxt * stride
+    return nfix
+
+
+def write_rebased_kernel(src: Path, dst: Path) -> tuple[int, dict]:
+    buf = bytearray(src.read_bytes())
+    macho = parse_macho(buf)
+    nfix = apply_chained_fixups(buf, macho)
+    if macho["fixups"] and nfix <= 0:
+        raise SystemExit("LC_DYLD_CHAINED_FIXUPS present but applied 0 fixups")
+    dst.write_bytes(buf)
+    return nfix, macho
+
 
 def recompute_bootimg_id(buf: bytearray) -> None:
     pg = struct.unpack_from("<I", buf, 36)[0]
     hdr_ver = struct.unpack_from("<I", buf, 40)[0]
     ksize, _, rsize, _, ssize, _ = struct.unpack_from("<6I", buf, 8)
-    rec_size, _, dtb_size, _ = (
-        struct.unpack_from("<IQIQ", buf, 1632) if hdr_ver >= 1 else (0, 0, 0, 0)
+    rec_size, _, _hdr_size, dtb_size, _ = (
+        struct.unpack_from("<IQIIQ", buf, 1632) if hdr_ver >= 1 else (0, 0, 0, 0, 0)
     )
     if hdr_ver < 2:
         dtb_size = 0
@@ -84,6 +194,12 @@ def build_fat32_payload(
     out_img.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="pclm10-fat-") as td:
         tmp = Path(td)
+        rebased_kernel = tmp / "kernel.rebased.macho"
+        nfix, macho = write_rebased_kernel(kernel, rebased_kernel)
+        text_va = macho["segs"][0]["vmaddr"] if macho["segs"] else 0
+        print(
+            f"Rebased kernel {kernel.name}: nfix={nfix}, text_va=0x{text_va:x}, entry=0x{(macho['entry'] or 0):x}"
+        )
         raw = tmp / "payload.img"
         raw.write_bytes(b"\x00" * size_bytes)
         dev = (
@@ -100,13 +216,13 @@ def build_fat32_payload(
             mnt.mkdir()
             subprocess.run(["mount", "-t", "msdos", dev, str(mnt)], check=True)
             try:
-                (mnt / "EFI/UniXNU").mkdir(parents=True)
-                (mnt / "Payloads").mkdir(parents=True)
+                payloads_dir = mnt / "EFI/UniXNU/Payloads"
+                payloads_dir.mkdir(parents=True)
                 (mnt / "EFI/UniXNU/unixnu.toml").write_text(toml, encoding="utf-8")
-                shutil.copy2(kernel, mnt / "Payloads/kernel.macho")
-                shutil.copy2(adt, mnt / "Payloads/kernel.macho.adt")
+                shutil.copy2(rebased_kernel, payloads_dir / "kernel.macho")
+                shutil.copy2(adt, payloads_dir / "kernel.macho.adt")
                 if ramdisk:
-                    shutil.copy2(ramdisk, mnt / "Payloads/ramdisk.macho")
+                    shutil.copy2(ramdisk, payloads_dir / "ramdisk.macho")
             finally:
                 subprocess.run(["umount", str(mnt)], check=True)
         finally:
@@ -165,7 +281,7 @@ def main() -> int:
     pg = struct.unpack_from("<I", tmpl, 36)[0]
     hdr_ver = struct.unpack_from("<I", tmpl, 40)[0]
     old_ksize, _, old_rsize, _, old_ssize, _ = struct.unpack_from("<6I", tmpl, 8)
-    rec_size, _, dtb_size, _ = struct.unpack_from("<IQIQ", tmpl, 1632)
+    rec_size, _, _hdr_size, dtb_size, _ = struct.unpack_from("<IQIIQ", tmpl, 1632)
     align = lambda n: (n + pg - 1) & ~(pg - 1) if n else 0
     old_dtb_off = pg + align(old_ksize) + align(old_rsize) + align(old_ssize) + align(rec_size)
     dtb_bytes = bytes(tmpl[old_dtb_off : old_dtb_off + dtb_size])
@@ -178,7 +294,7 @@ def main() -> int:
     struct.pack_into("<I", hdr, 16, len(payload_bytes))
     struct.pack_into("<I", hdr, 24, 0)
     if hdr_ver >= 2:
-        struct.pack_into("<I", hdr, 1644, len(dtb_bytes))
+        struct.pack_into("<I", hdr, 1648, len(dtb_bytes))
 
     def pad(b: bytes) -> bytes:
         rem = len(b) % pg
