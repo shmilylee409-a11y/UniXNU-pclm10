@@ -114,7 +114,8 @@ static void udelay_cntvct(uint32_t usec)
 	__asm__ volatile("isb\nmrs %0, cntvct_el0" : "=r"(start));
 	ticks = (freq * (uint64_t)usec) / 1000000ULL;
 	if (!ticks) ticks = 1;
-	for (;;) {
+	uint64_t max_spins = (uint64_t)usec * 250ULL + 2000ULL;
+	for (uint64_t spins = 0; spins < max_spins; ++spins) {
 		uint64_t now = 0;
 		__asm__ volatile("mrs %0, cntvct_el0" : "=r"(now));
 		if ((now - start) >= ticks) break;
@@ -186,29 +187,45 @@ static int spmi_obs_read8(vm_offset_t core, vm_offset_t cnfg, vm_offset_t obs,
 	return 3;
 }
 
-static int spmi_chnl_write8(vm_offset_t core, vm_offset_t cnfg, unsigned count,
-                            unsigned addr, uint8_t value)
-{
-	static int cached_apid = -1;
-	static vm_offset_t cached_lane = 0;
+static volatile uint8_t *br_cached_imem;
+static volatile uint32_t *br_cached_pshold;
+static volatile uint8_t *br_cached_wdt;
+static vm_offset_t br_spmi_core, br_spmi_cnfg, br_spmi_obs, br_spmi_lane;
+static unsigned br_spmi_count;
+static int br_spmi_ready;
 
-	int apid = spmi_find_apid(core, cnfg, count, (addr >> 8) & 0xfffu);
-	if (apid < 0) return 1;
-	if (cached_apid != apid || !cached_lane) {
-		if (cached_apid >= 0 && cached_lane) return 4;
-		vm_offset_t lane = ml_io_map_unmappable(
+static void br_spmi_premap(void)
+{
+	if (br_spmi_ready != 0) return;
+	br_spmi_core = ml_io_map_unmappable((vm_offset_t)SPMI_CORE_BASE, (vm_size_t)SPMI_CORE_SIZE, 7u);
+	br_spmi_cnfg = ml_io_map_unmappable((vm_offset_t)SPMI_CNFG_BASE, (vm_size_t)SPMI_CNFG_SIZE, 7u);
+	br_spmi_obs  = ml_io_map_unmappable((vm_offset_t)SPMI_OBS_BASE,  (vm_size_t)SPMI_OBS_SIZE,  7u);
+	if (!br_spmi_core || !br_spmi_cnfg || !br_spmi_obs) { br_spmi_ready = -1; return; }
+	uint32_t ver = spmi_rd(br_spmi_core, 0u);
+	br_spmi_count = spmi_rd(br_spmi_core, 4u) & 0x7ffu;
+	if (ver < 0x50000000u || ver >= 0x70000000u || !br_spmi_count || br_spmi_count > SPMI_MAX_APIDS) {
+		br_spmi_ready = -1;
+		return;
+	}
+	int apid = spmi_find_apid(br_spmi_core, br_spmi_cnfg, br_spmi_count, (PON_SPARE_ADDR >> 8) & 0xfffu);
+	if (apid >= 0) {
+		br_spmi_lane = ml_io_map_unmappable(
 		    (vm_offset_t)(SPMI_CHNLS_BASE + SPMI_CHNL_STRIDE * (unsigned)apid),
 		    (vm_size_t)SPMI_CHNL_STRIDE, 7u);
-		if (!lane) return 5;
-		cached_lane = lane;
-		cached_apid = apid;
 	}
-	*(volatile uint32_t *)(cached_lane + SPMI_WDATA0) = value;
+	br_spmi_ready = 1;
+}
+
+static int spmi_chnl_write8_cached(unsigned addr, uint8_t value)
+{
+	if (br_spmi_ready <= 0) br_spmi_premap();
+	if (br_spmi_ready <= 0 || !br_spmi_lane) return 5;
+	*(volatile uint32_t *)(br_spmi_lane + SPMI_WDATA0) = value;
 	__asm__ volatile("dsb osh" ::: "memory");
-	*(volatile uint32_t *)(cached_lane + SPMI_CMD) = ((addr & 0xffu) << 4);
+	*(volatile uint32_t *)(br_spmi_lane + SPMI_CMD) = ((addr & 0xffu) << 4);
 	__asm__ volatile("dsb osh" ::: "memory");
 	for (unsigned i = 0; i < 1000u; ++i) {
-		uint32_t st = spmi_rd(cached_lane, SPMI_STATUS);
+		uint32_t st = spmi_rd(br_spmi_lane, SPMI_STATUS);
 		if (st & SPMI_STATUS_DONE) return (st & SPMI_STATUS_ERR) ? 2 : 0;
 		udelay_cntvct(50);
 	}
@@ -218,39 +235,40 @@ static int spmi_chnl_write8(vm_offset_t core, vm_offset_t cnfg, unsigned count,
 static int pon_mark_bootloader(uint8_t *out_subtype, uint8_t *out_before,
                                uint8_t *out_after, int *out_rc)
 {
-	static vm_offset_t core = 0, cnfg = 0, obs = 0;
-	static unsigned count = 0;
-	static int ready = 0;
-
-	if (ready < 0) return 1;
-	if (ready == 0) {
-		core = ml_io_map_unmappable((vm_offset_t)SPMI_CORE_BASE, (vm_size_t)SPMI_CORE_SIZE, 7u);
-		cnfg = ml_io_map_unmappable((vm_offset_t)SPMI_CNFG_BASE, (vm_size_t)SPMI_CNFG_SIZE, 7u);
-		obs  = ml_io_map_unmappable((vm_offset_t)SPMI_OBS_BASE,  (vm_size_t)SPMI_OBS_SIZE,  7u);
-		if (!core || !cnfg || !obs) { ready = -1; return 1; }
-		uint32_t ver = spmi_rd(core, 0u);
-		count = spmi_rd(core, 4u) & 0x7ffu;
-		if (ver < 0x50000000u || ver >= 0x70000000u || !count || count > SPMI_MAX_APIDS) {
-			ready = -1;
-			return 2;
-		}
-		ready = 1;
-	}
+	if (br_spmi_ready == 0) br_spmi_premap();
+	if (br_spmi_ready < 0) return 1;
 	uint8_t subtype = 0, before = 0, after = 0;
-	int rc = spmi_obs_read8(core, cnfg, obs, count, PON_SUBTYPE_ADDR, &subtype);
+	int rc = spmi_obs_read8(br_spmi_core, br_spmi_cnfg, br_spmi_obs, br_spmi_count, PON_SUBTYPE_ADDR, &subtype);
 	*out_subtype = subtype;
 	if (rc) { *out_rc = rc; return 3; }
 	unsigned shift = (subtype >= PON_GEN2_SUBTYPE) ? 1u : 2u;
 	uint8_t mask = (uint8_t)(0xffu << shift);
 	uint8_t want = (uint8_t)(PON_REASON_BOOTLOADER << shift);
-	(void)spmi_obs_read8(core, cnfg, obs, count, PON_SPARE_ADDR, &before);
+	(void)spmi_obs_read8(br_spmi_core, br_spmi_cnfg, br_spmi_obs, br_spmi_count, PON_SPARE_ADDR, &before);
 	*out_before = before;
-	rc = spmi_chnl_write8(core, cnfg, count, PON_SPARE_ADDR,
-	                      (uint8_t)((before & (uint8_t)~mask) | want));
-	if (!rc) rc = spmi_obs_read8(core, cnfg, obs, count, PON_SPARE_ADDR, &after);
+	rc = spmi_chnl_write8_cached(PON_SPARE_ADDR, (uint8_t)((before & (uint8_t)~mask) | want));
+	if (!rc) rc = spmi_obs_read8(br_spmi_core, br_spmi_cnfg, br_spmi_obs, br_spmi_count, PON_SPARE_ADDR, &after);
 	*out_after = after;
 	*out_rc = rc;
 	return (!rc && (after & mask) == want) ? 0 : 4;
+}
+
+void pclm10_boot_reset_premap(void);
+void pclm10_boot_reset_premap(void)
+{
+	if (!br_cached_imem) {
+		br_cached_imem = (volatile uint8_t *)ml_io_map_unmappable(
+		    (vm_offset_t)BR_IMEM_BASE, (vm_size_t)BR_IMEM_SIZE, 7u);
+	}
+	if (!br_cached_pshold) {
+		br_cached_pshold = (volatile uint32_t *)ml_io_map_unmappable(
+		    (vm_offset_t)BR_PSHOLD_BASE, (vm_size_t)BR_PSHOLD_SIZE, 7u);
+	}
+	if (!br_cached_wdt) {
+		br_cached_wdt = (volatile uint8_t *)ml_io_map_unmappable(
+		    (vm_offset_t)BR_WDT_BASE, (vm_size_t)BR_WDT_SIZE, 7u);
+	}
+	br_spmi_premap();
 }
 
 int boot_reset_bootloader(char *text, unsigned cap);
@@ -287,26 +305,16 @@ int boot_reset_bootloader(char *text, unsigned cap)
 	struct br_writer w = { text, cap, 0 };
 	if (text && cap) text[0] = '\0';
 
-	volatile uint8_t *imem = (volatile uint8_t *)ml_io_map_unmappable(
-	    (vm_offset_t)BR_IMEM_BASE, (vm_size_t)BR_IMEM_SIZE, 7u);
+	if (!br_cached_imem) pclm10_boot_reset_premap();
+	volatile uint8_t *imem = br_cached_imem;
 	if (!imem) {
 		br_puts(&w, "reset refused: imem map failed");
 		return 1;
 	}
 	volatile uint32_t *cell = (volatile uint32_t *)(imem + BR_IMEM_REASON_OFF);
-	uint32_t imem_before = *cell;
 	*cell = BR_REASON_BOOTLOADER;
 	__asm__ volatile("dsb sy" ::: "memory");
 	uint32_t imem_after = *cell;
-	ml_io_unmap((vm_offset_t)imem, (vm_size_t)BR_IMEM_SIZE);
-
-	if (imem_after != BR_REASON_BOOTLOADER) {
-		br_puts(&w, "reset refused: imem verify failed ");
-		br_puthex(&w, imem_before, 8);
-		br_puts(&w, "->");
-		br_puthex(&w, imem_after, 8);
-		return 11;
-	}
 
 	uint8_t pon_sub = 0, pon_before = 0, pon_after = 0;
 	int pon_rc = -1;
@@ -316,18 +324,15 @@ int boot_reset_bootloader(char *text, unsigned cap)
 	uint64_t psr = scm_pwr(0x2ULL, 0ULL);
 	(void)smc_psci(PSCI_SYSTEM_RESET, 0ULL);
 
-	volatile uint32_t *pshold = (volatile uint32_t *)ml_io_map_unmappable(
-	    (vm_offset_t)BR_PSHOLD_BASE, (vm_size_t)BR_PSHOLD_SIZE, 7u);
+	volatile uint32_t *pshold = br_cached_pshold;
 	if (pshold) {
 		*pshold = 0u;
 		__asm__ volatile("dsb sy" ::: "memory");
-		ml_io_unmap((vm_offset_t)pshold, (vm_size_t)BR_PSHOLD_SIZE);
 	}
 	udelay_cntvct(150000u);
 
 	// Fallback if SCM/PSCI/PS_HOLD all returned: force APSS KPSS watchdog bite (~31ms).
-	volatile uint8_t *wdt = (volatile uint8_t *)ml_io_map_unmappable(
-	    (vm_offset_t)BR_WDT_BASE, (vm_size_t)BR_WDT_SIZE, 7u);
+	volatile uint8_t *wdt = br_cached_wdt;
 	if (wdt) {
 		*(volatile uint32_t *)(wdt + BR_WDT_EN)   = 0u;
 		*(volatile uint32_t *)(wdt + BR_WDT_RST)  = 1u;

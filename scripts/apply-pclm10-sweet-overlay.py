@@ -663,12 +663,23 @@ def apply_overlay(xnu: Path) -> None:
         'sweet_early_relocate(SWEET_EARLY_FB_VA + 0x01000000ULL);',
         'arm_vm_init sweet_early_relocate',
     )
+    replace_exact(
+        xnu / 'osfmk/arm64/arm_vm_init.c',
+        '\tva_l1_end = (va_l1_end + 0x00000000007FFFFFULL) & 0xFFFFFFFFFF800000ULL;',
+        '\tva_l1_end = (va_l1_end + 0x00000000007FFFFFULL) & 0xFFFFFFFFFF800000ULL;\n'
+        '#if defined(SWEET)\n'
+        '\tif (va_l1_end < va_l1 + (128ULL << 20)) {\n'
+        '\t\tva_l1_end = va_l1 + (128ULL << 20);\n'
+        '\t}\n'
+        '#endif',
+        'arm_vm_init expand early IO L3 PT to 128MB',
+    )
 
     # 2. Pre-map PCLM10 reset registers immediately after arm_vm_init & hook ALL panic stop paths
     replace_exact(
         xnu / 'osfmk/arm/arm_init.c',
         '\tarm_vm_init(xmaxmem, args);',
-        '\tarm_vm_init(xmaxmem, args);\n#if defined(SWEET)\n\textern void pclm10_reset_premap(void);\n\tpclm10_reset_premap();\n#endif',
+        '\tarm_vm_init(xmaxmem, args);\n#if defined(SWEET)\n\textern void pclm10_reset_premap(void);\n\tpclm10_reset_premap();\n#if XNU_QCOM_USB_DEBUG\n\textern void pclm10_boot_reset_premap(void);\n\tpclm10_boot_reset_premap();\n#endif\n#endif',
         'arm_init pclm10_reset_premap',
     )
     replace_exact(
