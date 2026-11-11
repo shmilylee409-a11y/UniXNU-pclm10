@@ -134,7 +134,7 @@ jobs:
           text = p.read_text()
           anchor = '        cd "${WORK_DIR}"\n    fi'
           overlay = str(Path(os.environ['GITHUB_WORKSPACE']) / 'device/scripts/apply-pclm10-sweet-overlay.py')
-          inject = f'        python3 "{overlay}" --xnu "${{WORK_DIR}}/xnu"\n' + anchor
+          inject = '        python3 "' + overlay + '" --xnu "${WORK_DIR}/xnu"\n' + anchor
           assert text.count(anchor) == 1, 'anchor mismatch in dxb/build.sh'
           p.write_text(text.replace(anchor, inject, 1))
           PY
