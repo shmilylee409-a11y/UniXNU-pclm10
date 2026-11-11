@@ -159,6 +159,7 @@ def recompute_bootimg_id(buf: bytearray) -> None:
 
 def build_fat32_payload(
     *,
+    template_payload: bytes | None = None,
     kernel: Path,
     adt: Path,
     ramdisk: Path | None,
@@ -201,7 +202,8 @@ def build_fat32_payload(
             f"Rebased kernel {kernel.name}: nfix={nfix}, text_va=0x{text_va:x}, entry=0x{(macho['entry'] or 0):x}"
         )
         raw = tmp / "payload.img"
-        raw.write_bytes(b"\x00" * size_bytes)
+        use_template_fat = template_payload is not None and len(template_payload) == size_bytes
+        raw.write_bytes(template_payload if use_template_fat else (b"\x00" * size_bytes))
         dev = (
             subprocess.check_output(
                 ["hdiutil", "attach", "-imagekey", "diskimage-class=CRawDiskImage", "-nomount", str(raw)],
@@ -211,11 +213,20 @@ def build_fat32_payload(
             .split()[0]
         )
         try:
-            subprocess.run(["newfs_msdos", "-F", "32", "-c", "1", "-v", "UNIXNU", dev], check=True)
+            if not use_template_fat:
+                subprocess.run(["newfs_msdos", "-F", "32", "-c", "1", "-v", "UNIXNU", dev], check=True)
             mnt = tmp / "mnt"
             mnt.mkdir()
             subprocess.run(["mount", "-t", "msdos", dev, str(mnt)], check=True)
             try:
+                if use_template_fat:
+                    for item in list(mnt.iterdir()):
+                        if item.name.startswith("."):
+                            continue
+                        if item.is_dir():
+                            shutil.rmtree(item)
+                        else:
+                            item.unlink()
                 payloads_dir = mnt / "EFI/UniXNU/Payloads"
                 payloads_dir.mkdir(parents=True)
                 (mnt / "EFI/UniXNU/unixnu.toml").write_text(toml, encoding="utf-8")
@@ -266,16 +277,6 @@ def main() -> int:
         mkadt_cmd.append("--ramdisk")
     subprocess.run(mkadt_cmd, check=True)
 
-    payload_path = args.out_dir / "payload.img"
-    build_fat32_payload(
-        kernel=args.kernel,
-        adt=adt_path,
-        ramdisk=args.ramdisk,
-        bootargs=args.bootargs,
-        size_bytes=args.payload_size,
-        out_img=payload_path,
-    )
-
     # Assemble Android v2 boot.img preserving ABL's verified template header + stock dtb
     tmpl = bytearray(args.template.read_bytes())
     pg = struct.unpack_from("<I", tmpl, 36)[0]
@@ -283,8 +284,21 @@ def main() -> int:
     old_ksize, _, old_rsize, _, old_ssize, _ = struct.unpack_from("<6I", tmpl, 8)
     rec_size, _, _hdr_size, dtb_size, _ = struct.unpack_from("<IQIIQ", tmpl, 1632)
     align = lambda n: (n + pg - 1) & ~(pg - 1) if n else 0
+    old_r_off = pg + align(old_ksize)
+    old_payload = bytes(tmpl[old_r_off : old_r_off + old_rsize]) if old_rsize == args.payload_size else None
     old_dtb_off = pg + align(old_ksize) + align(old_rsize) + align(old_ssize) + align(rec_size)
     dtb_bytes = bytes(tmpl[old_dtb_off : old_dtb_off + dtb_size])
+
+    payload_path = args.out_dir / "payload.img"
+    build_fat32_payload(
+        template_payload=old_payload,
+        kernel=args.kernel,
+        adt=adt_path,
+        ramdisk=args.ramdisk,
+        bootargs=args.bootargs,
+        size_bytes=args.payload_size,
+        out_img=payload_path,
+    )
 
     uefi_k = extract_kernel_from_bootimg(args.uefi_bootimg)
     payload_bytes = payload_path.read_bytes()

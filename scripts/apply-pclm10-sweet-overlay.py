@@ -34,6 +34,7 @@ extern uint64_t sweet_usb_rx_count(void);
 void pclm10_reset_premap(void);
 int pclm10_boot_reset_bootloader(void);
 void pclm10_panic_autoreset(void);
+void pclm10_early_panic_reset(volatile uint32_t *imem);
 void pclm10_watchdog_start(void);
 void pclm10_smmu_bypass_stream(uint32_t stream);
 
@@ -303,6 +304,39 @@ pclm10_panic_autoreset(void)
 	(void)pclm10_boot_reset_bootloader();
 }
 
+void
+pclm10_early_panic_reset(volatile uint32_t *imem)
+{
+	static bool early_running;
+	if (early_running) {
+		return;
+	}
+	early_running = true;
+	unsigned int sec = 8u;
+	if (PE_state.initialized) {
+		unsigned int parsed = 0;
+		if (PE_parse_boot_argn("pclm10-panic-reset", &parsed, sizeof(parsed))) {
+			if (parsed == 0) {
+				return;
+			}
+			sec = parsed > 30u ? 30u : parsed;
+		}
+	}
+	for (unsigned int i = 0; i < sec * 10u; ++i) {
+		br_udelay(100000u);
+	}
+	if (br_imem) {
+		(void)pclm10_boot_reset_bootloader();
+	}
+	if (imem != NULL) {
+		imem[BR_IMEM_REASON_OFF / 4u] = BR_REASON_BOOTLOADER;
+		__asm__ volatile("dsb sy" ::: "memory");
+	}
+	(void)br_scm_pwr(0x1ULL, 0ULL);
+	(void)br_scm_pwr(0x2ULL, 0ULL);
+	(void)br_smc_psci(PSCI_SYSTEM_RESET, 0ULL);
+}
+
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 static void
@@ -498,6 +532,7 @@ def replace_exact(path: Path, old: str, new: str, label: str) -> None:
 
 def apply_overlay(xnu: Path) -> None:
     # 1. Early framebuffer physical address: 0x9c000000 -> 0x9d000000 (within same 32MB L2 block)
+    #    and early IMEM (0x14000000) + LowExceptionVectorBase reset for pre-arm_vm_init faults
     replace_exact(
         xnu / 'osfmk/arm64/start.s',
         'MOV64\tx0, (0x9c000000 + 2368 * 4320)',
@@ -505,10 +540,116 @@ def apply_overlay(xnu: Path) -> None:
         'start.s stage0 fb address',
     )
     replace_exact(
+        xnu / 'osfmk/arm64/start.s',
+        '\tstr\t\tx11, [x13, x12, lsl #TTE_SHIFT]\n#endif',
+        '\tstr\t\tx11, [x13, x12, lsl #TTE_SHIFT]\n'
+        '\t/* PCLM10: map 0x14000000 (IMEM 0x146bf65c) Device-nGnRnE in V=P L2 */\n'
+        '\tMOV64\tx10, 0x14000000\n'
+        '\tMOV64\tx11, (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_DISABLE) | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX)\n'
+        '\torr\t\tx11, x11, x10\n'
+        '\tand\t\tx12, x10, #(ARM_TT_L2_INDEX_MASK)\n'
+        '\tlsr\t\tx12, x12, #(ARM_TT_L2_SHIFT)\n'
+        '\tstr\t\tx11, [x13, x12, lsl #TTE_SHIFT]\n#endif',
+        'start.s early IMEM V=P mapping',
+    )
+    low_vec_old = (
+        'LEXT(LowExceptionVectorBase)\n'
+        '\t/* EL1 SP 0 */\n'
+        '\tb\t\t.\n'
+        '\t.align\t7\n'
+        '\tb\t\t.\n'
+        '\t.align\t7\n'
+        '\tb\t\t.\n'
+        '\t.align\t7\n'
+        '\tb\t\t.\n'
+        '\t/* EL1 SP1 */\n'
+        '\t.align\t7\n'
+        '\tb\t\t.\n'
+        '\t.align\t7\n'
+        '\tb\t\t.\n'
+        '\t.align\t7\n'
+        '\tb\t\t.\n'
+        '\t.align\t7\n'
+        '\tb\t\t.'
+    )
+    low_vec_reset = (
+        '\tMOV64\tx0, 0x146bf65c\n'
+        '\tmovz\tw1, #0x5500\n'
+        '\tmovk\tw1, #0x7766, lsl #16\n'
+        '\tstr\t\tw1, [x0]\n'
+        '\tdsb\t\tsy\n'
+        '\tMOV64\tx0, 0x84000009\n'
+        '\tmov\t\tx1, #0\n'
+        '\tmov\t\tx2, #0\n'
+        '\tmov\t\tx3, #0\n'
+        '\tsmc\t\t#0\n'
+        '\tb\t\t.'
+    )
+    low_vec_new = (
+        'LEXT(LowExceptionVectorBase)\n'
+        '\t/* EL1 SP 0 */\n'
+        + low_vec_reset + '\n'
+        '\t.align\t7\n'
+        + low_vec_reset + '\n'
+        '\t.align\t7\n'
+        + low_vec_reset + '\n'
+        '\t.align\t7\n'
+        + low_vec_reset + '\n'
+        '\t/* EL1 SP1 */\n'
+        '\t.align\t7\n'
+        + low_vec_reset + '\n'
+        '\t.align\t7\n'
+        + low_vec_reset + '\n'
+        '\t.align\t7\n'
+        + low_vec_reset + '\n'
+        '\t.align\t7\n'
+        + low_vec_reset
+    )
+    replace_exact(xnu / 'osfmk/arm64/start.s', low_vec_old, low_vec_new, 'start.s LowExceptionVectorBase reset')
+    replace_exact(
         xnu / 'osfmk/arm64/sweet_early.c',
         'static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)0x9c000000;',
-        'static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)0x9d000000;',
-        'sweet_early.c initial fb pointer',
+        'static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)0x9d000000;\nstatic volatile uint32_t *early_imem = (volatile uint32_t *)(uintptr_t)0x146bf000;\nextern void pclm10_early_panic_reset(volatile uint32_t *imem);',
+        'sweet_early.c initial fb and imem pointers',
+    )
+    replace_exact(
+        xnu / 'osfmk/arm64/sweet_early.c',
+        '\tearly_fb = (volatile uint32_t *)(uintptr_t)base;\n\t__asm__ volatile("dsb sy" ::: "memory");',
+        '\tearly_fb = (volatile uint32_t *)(uintptr_t)base;\n\tearly_imem = (volatile uint32_t *)(uintptr_t)(base + 0x01000000ULL + 0x006bf000ULL);\n\t__asm__ volatile("dsb sy" ::: "memory");',
+        'sweet_early.c relocate imem',
+    )
+    replace_exact(
+        xnu / 'osfmk/arm64/sweet_early.c',
+        '\tsweet_early_putc(\'\\n\');\n\t__asm__ volatile("dsb sy" ::: "memory");\n}',
+        '\tsweet_early_putc(\'\\n\');\n\t__asm__ volatile("dsb sy" ::: "memory");\n\tpclm10_early_panic_reset(early_imem);\n}',
+        'sweet_early.c early panic autoreset',
+    )
+    replace_exact(
+        xnu / 'osfmk/arm64/arm_vm_init.c',
+        '#define SWEET_EARLY_FB_VA (VM_MIN_KERNEL_ADDRESS + ARM_TT_L2_SIZE)',
+        '#define SWEET_EARLY_FB_VA   (VM_MIN_KERNEL_ADDRESS + ARM_TT_L2_SIZE)\n#define SWEET_EARLY_IMEM_VA (VM_MIN_KERNEL_ADDRESS + 2 * ARM_TT_L2_SIZE)',
+        'arm_vm_init SWEET_EARLY_IMEM_VA',
+    )
+    replace_exact(
+        xnu / 'osfmk/arm64/arm_vm_init.c',
+        '\t*slot = 0x9c000000ULL | ARM_TTE_VALID | ARM_TTE_TYPE_BLOCK |\n'
+        '\t    ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) |\n'
+        '\t    ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) |\n'
+        '\t    ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX;\n'
+        '\t__asm__ volatile("dsb ishst" ::: "memory");',
+        '\t*slot = 0x9c000000ULL | ARM_TTE_VALID | ARM_TTE_TYPE_BLOCK |\n'
+        '\t    ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) |\n'
+        '\t    ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) |\n'
+        '\t    ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX;\n'
+        '\tassert(SWEET_EARLY_IMEM_VA + ARM_TT_L2_SIZE <= gVirtBase);\n'
+        '\ttt_entry_t *imem_slot = &l2[(SWEET_EARLY_IMEM_VA & ARM_TT_L2_INDEX_MASK) >> ARM_TT_L2_SHIFT];\n'
+        '\tassert(*imem_slot == ARM_TTE_EMPTY);\n'
+        '\t*imem_slot = 0x14000000ULL | ARM_TTE_VALID | ARM_TTE_TYPE_BLOCK |\n'
+        '\t    ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) |\n'
+        '\t    ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_DISABLE) |\n'
+        '\t    ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX;\n'
+        '\t__asm__ volatile("dsb ishst" ::: "memory");',
+        'arm_vm_init map SWEET_EARLY_IMEM_VA',
     )
     replace_exact(
         xnu / 'osfmk/arm64/arm_vm_init.c',
