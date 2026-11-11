@@ -71,7 +71,7 @@ def transform_source(src_dir: Path, dst_dir: Path) -> None:
     # 1. Remove IOStorageFamily header in probe-only mode; add stream helper + console output.
     replace_exact(
         "#include <IOKit/storage/IOBlockStorageDevice.h>",
-        "#if !defined(PCLM10_UFS_PROBE_ONLY)\n#include <IOKit/storage/IOBlockStorageDevice.h>\n#endif\n#include <sys/systm.h>",
+        "#if !defined(PCLM10_UFS_PROBE_ONLY)\n#include <IOKit/storage/IOBlockStorageDevice.h>\n#endif\n#include <sys/systm.h>\n#include <machine/machine_routines.h>",
         "IOBlockStorageDevice include",
     )
 
@@ -183,7 +183,6 @@ static inline void pclm10UfsDelayUs (uint64_t us)
   unsigned forceAlloc = 0;
   PE_parse_boot_argn ("native-ufs-probe-alloc", &forceAlloc, sizeof (forceAlloc));
   OSSharedPtr<IOMemoryMap> regionMap;
-  IOBufferMemoryDescriptor *allocDesc = nullptr;
   uint8_t *virt = nullptr;
   uint64_t phys = 0;
   if (!forceAlloc && fwList && !(fwList & 0xfff) && (fwList < 0xffffc000ULL || fwList >= 0x100000000ULL)) {
@@ -198,20 +197,17 @@ static inline void pclm10UfsDelayUs (uint64_t us)
     }
   }
   if (!virt) {
-    allocDesc = IOBufferMemoryDescriptor::inTaskWithOptions (
-      kernel_task,
-      static_cast<IOOptionBits> (kIODirectionInOut) | static_cast<IOOptionBits> (kIOMemoryPhysicallyContiguous) |
-      static_cast<IOOptionBits> (kIOMemoryMapperNone),
-      16384, 4096);
-    if (allocDesc) {
-      IOByteCount segLen = 0;
-      virt = static_cast<uint8_t *> (allocDesc->getBytesNoCopy ());
-      phys = allocDesc->getPhysicalSegment (0, &segLen, kIOMemoryMapperNone);
-      if (!virt || !phys || (phys & 0xfff) || segLen < 16384) {
-        allocDesc->release ();
-        allocDesc = nullptr;
-        virt = nullptr;
+    static uint8_t sPclm10UfsDma[16384] __attribute__((aligned(4096)));
+    uint64_t base = static_cast<uint64_t> (ml_static_vtop (reinterpret_cast<vm_offset_t> (sPclm10UfsDma)));
+    bool ok = base && !(base & 0xfffULL);
+    for (size_t off = 0; ok && off < sizeof (sPclm10UfsDma); off += 4096) {
+      if (static_cast<uint64_t> (ml_static_vtop (reinterpret_cast<vm_offset_t> (sPclm10UfsDma + off))) != base + off) {
+        ok = false;
       }
+    }
+    if (ok) {
+      virt = sPclm10UfsDma;
+      phys = base;
     }
   }
   if (!virt) {
