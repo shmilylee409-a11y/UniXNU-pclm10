@@ -109,7 +109,7 @@ jobs:
 
   xnu:
     if: ${{ inputs.build_xnu != false }}
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 120
     env:
       SWEET_SHA: 45263bee51df4a0f55cdf9c649af886399488ddb
