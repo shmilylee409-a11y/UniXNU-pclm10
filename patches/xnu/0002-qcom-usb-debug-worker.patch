@@ -35,7 +35,7 @@
 + * initialization, allocation, IRQ handler, filesystem or display dependency.
 + * States: 0 unstarted, 1 creating, 2 running, 3 start/bind failure, 4 stopped.
 + */
-++static unsigned int qcom_usb_worker_state;
++static unsigned int qcom_usb_worker_state;
 +
 +/* Wait for queued USB traffic to drain and reset straight to fastboot on the
 + * current master-bound worker thread (avoiding unscheduled timer blocks). */
