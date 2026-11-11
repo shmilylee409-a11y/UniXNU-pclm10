@@ -216,12 +216,16 @@ static inline void pclm10UfsDelayUs (uint64_t us)
   }
   if (!virt) {
     panic ("NATIVE_UFS adopt: DMA buffer unavailable fw=%llx", fwList);
-  }"""
+  }
+  printf ("NATIVE_UFS adopt step1: level=%u hc=%p fw=%llx virt=%p phys=%llx\\n",
+          level, (void *) hc, fwList, (void *) virt, phys);"""
     replace_exact(old_fwlist, new_fwlist, "adoptAndRead DMA fallback")
 
     replace_exact(
         "  smmuBypassStream (0x60, smmuMap, smmuReport, phys, 16384);",
-        "  smmuBypassStream (sm8150UfsStream (), smmuMap, smmuReport, phys, 16384);",
+        "  printf (\"NATIVE_UFS adopt step2: stopped rsr=%08x hcs=%08x\\n\", read32 (hc, 0x60), hcsBefore);\n"
+        "  smmuBypassStream (sm8150UfsStream (), smmuMap, smmuReport, phys, 16384);\n"
+        "  printf (\"NATIVE_UFS adopt step3: smmu idx_bank=%08x cbar=%08x sctlr=%08x\\n\", smmuReport[0], smmuReport[1], smmuReport[2]);",
         "adoptAndRead stream ID",
     )
 
@@ -285,6 +289,18 @@ static inline void pclm10UfsDelayUs (uint64_t us)
          firstIdx[0], firstSmr[0], firstS2cr[0], firstIdx[1], firstSmr[1], firstS2cr[1],
          firstIdx[2], firstSmr[2], firstS2cr[2], firstIdx[3], firstSmr[3], firstS2cr[3]);"""
     replace_exact(old_smmu_scan, new_smmu_scan, "inspectSmmu stream ID")
+
+    replace_exact(
+        "  if (level == 3) {",
+        "  printf (\"NATIVE_UFS adopt step4: list started hcs=%08x\\n\", read32 (hc, 0x30));\n  if (level == 3) {",
+        "adoptAndRead step4 trace",
+    )
+
+    replace_exact(
+        "  if ((!probe && !rootMode) || !OSDynamicCast (IOPlatformExpertDevice, provider)) {",
+        "  if (probe) printf (\"NATIVE_UFS start: probe=%u root=%u pe=%d\\n\", probe, rootMode, OSDynamicCast (IOPlatformExpertDevice, provider) != nullptr);\n  if ((!probe && !rootMode) || !OSDynamicCast (IOPlatformExpertDevice, provider)) {",
+        "start() entry trace",
+    )
 
     # 6. Guard root storage / IOBlockStorageDevice / write-window sections out in PCLM10_UFS_PROBE_ONLY mode.
     replace_exact(
