@@ -257,7 +257,7 @@ def main() -> int:
     p.add_argument("--d22ap-adt", type=Path, default=ROOT / "sweet_work/d22ap.adt")
     p.add_argument("--ramdisk", type=Path, default=None, help="Optional ramdisk (e.g. sweet_work/ramdisk.macho for rd=md0)")
     p.add_argument("--bootargs", default="debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam rd=md0 sweetusb=2 pclm10-autoreset=45 pclm10-panic-reset=8")
-    p.add_argument("--owned-memory-size", type=lambda s: int(s, 0), default=0x18000000)
+    p.add_argument("--owned-memory-size", type=lambda s: int(s, 0), default=0x10000000)
     p.add_argument("--payload-size", type=int, default=78643200)
     p.add_argument("--out-dir", type=Path, required=True)
     args = p.parse_args()

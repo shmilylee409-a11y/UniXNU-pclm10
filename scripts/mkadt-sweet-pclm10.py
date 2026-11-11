@@ -16,12 +16,12 @@ import adt  # noqa: E402
 SOC_BASE = 0x01000000
 GICD, GICD_SIZE = 0x17a00000, 0x10000
 GICR, GICR_SIZE = 0x17a60000, 0x100000
-FB, FB_SIZE = 0x9d000000, 0x02400000
+FB, FB_SIZE = 0x9d000000, 0x01000000
 FB_W, FB_H, FB_STRIDE = 1080, 2400, 1080 * 4
 UFS, UFS_SIZE = 0x01d84000, 0x3000
 TIMEBASE = 19200000
 VTIMER_INTID = 19
-PANIC_LOG_BASE = 0xDF000000
+PANIC_LOG_BASE = 0xD8000000
 PANIC_LOG_SIZE = 0x100000
 PCLM10_ECID = 0x50434C4D31300001  # 'PCLM10' + 1
 
@@ -53,8 +53,8 @@ def build(
     *,
     d22ap_adt: Path | None,
     dram_base: int = 0xc0000000,
-    dram_size: int = 0x18000000,
-    owned_memory_size: int | None = 0x18000000,
+    dram_size: int = 0x10000000,
+    owned_memory_size: int | None = 0x10000000,
     has_ramdisk: bool = False,
     cpus_count: int = 8,
 ):
@@ -230,7 +230,7 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("out", type=Path)
     p.add_argument("--d22ap-adt", type=Path, default=SCRIPTS_DIR.parent / "sweet_work" / "d22ap.adt")
-    p.add_argument("--owned-memory-size", type=lambda s: int(s, 0), default=0x18000000)
+    p.add_argument("--owned-memory-size", type=lambda s: int(s, 0), default=0x10000000)
     p.add_argument("--ramdisk", action="store_true", help="Include empty /chosen/memory-map/RAMDisk placeholder")
     p.add_argument("--cpus", type=int, default=8)
     args = p.parse_args()
