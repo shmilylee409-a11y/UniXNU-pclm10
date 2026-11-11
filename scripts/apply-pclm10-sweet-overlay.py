@@ -1745,6 +1745,53 @@ def apply_overlay(xnu: Path) -> None:
         '}',
         'sweet_touch.c fix S3706 F12_DATA_BASE (+0), DATA15 obj_attention, and F01 normal/IRQ init',
     )
+    replace_exact(
+        sweet_touch,
+        'void\nsweet_touch_init(void)\n{\n\tint enabled = 1;\n',
+        'static void\n'
+        'pclm10_autoswipe_line(int x0, int y0, int x1, int y1, int steps, int step_ms)\n'
+        '{\n'
+        '\tsweet_hid_touch(0, 1, x0, y0);\n'
+        '\ttouch_wait(20);\n'
+        '\tfor (int i = 1; i <= steps; ++i) {\n'
+        '\t\tint cx = x0 + ((x1 - x0) * i) / steps;\n'
+        '\t\tint cy = y0 + ((y1 - y0) * i) / steps;\n'
+        '\t\tsweet_hid_touch(0, 1, cx, cy);\n'
+        '\t\ttouch_wait((unsigned)step_ms);\n'
+        '\t}\n'
+        '\tsweet_hid_touch(0, 0, x1, y1);\n'
+        '}\n\n'
+        'static void\n'
+        'pclm10_autoswipe_thread(void *arg, wait_result_t result)\n'
+        '{\n'
+        '\tunsigned start_s = (unsigned)(uintptr_t)arg;\n'
+        '\t(void)result;\n'
+        '\tprintf("PCLM10 AUTOSWIPE: armed for t=%us\\n", start_s);\n'
+        '\ttouch_wait(start_s * 1000u);\n'
+        '\tprintf("PCLM10 AUTOSWIPE: gesture 1 home/unlock swipe (540,2385 -> 540,900)\\n");\n'
+        '\tpclm10_autoswipe_line(540, 2385, 540, 900, 24, 10);\n'
+        '\ttouch_wait(12000u);\n'
+        '\tprintf("PCLM10 AUTOSWIPE: gesture 2 horizontal swipe (920,1200 -> 160,1200)\\n");\n'
+        '\tpclm10_autoswipe_line(920, 1200, 160, 1200, 20, 10);\n'
+        '\ttouch_wait(12000u);\n'
+        '\tprintf("PCLM10 AUTOSWIPE: gesture 3 control center swipe (950,25 -> 950,950)\\n");\n'
+        '\tpclm10_autoswipe_line(950, 25, 950, 950, 24, 10);\n'
+        '\tprintf("PCLM10 AUTOSWIPE: sequence complete\\n");\n'
+        '\t(void)thread_terminate(current_thread());\n'
+        '\tthread_block(THREAD_CONTINUE_NULL);\n'
+        '}\n\n'
+        'void\nsweet_touch_init(void)\n{\n'
+        '\tint enabled = 1;\n'
+        '\tunsigned autoswipe_s = 0;\n'
+        '\t(void)PE_parse_boot_argn("pclm10-autoswipe", &autoswipe_s, sizeof(autoswipe_s));\n'
+        '\tif (autoswipe_s > 0u) {\n'
+        '\t\tthread_t sthread;\n'
+        '\t\tif (kernel_thread_start(pclm10_autoswipe_thread, (void *)(uintptr_t)autoswipe_s, &sthread) == KERN_SUCCESS) {\n'
+        '\t\t\tthread_deallocate(sthread);\n'
+        '\t\t}\n'
+        '\t}\n',
+        'sweet_touch.c add pclm10-autoswipe test gesture thread',
+    )
 
     # 6. Start USB ECM + watchdog (when not using QUD) and run optional UFS GPT dump/split before md0
     replace_exact(
@@ -2043,6 +2090,32 @@ def apply_overlay(xnu: Path) -> None:
         '\t}\n'
         '\tuint8_t type, present, usb, path, charger, error, temperature;\n\tuint16_t rawVoltage;',
         'SweetBattery.cpp poll BQ27541 + PM8150B before fallback',
+    )
+
+    fb_cpp = xnu / 'iokit/Kernel/arm/SweetFramebuffer.cpp'
+    replace_exact(
+        fb_cpp,
+        '\t\tif (sweet_fb_swaps_logged < 16) {\n'
+        '\t\t\tsweet_fb_swaps_logged++;\n'
+        '\t\t\tIOLog("SWEET FB: swap %u layer %u surface %u %ux%u fmt 0x%x bpr %u a %d,%d %ux%u b %d,%d %dx%d\\n",\n'
+        '\t\t\t    get32(rec, 0x50), layer, id, s ? s->width : 0, s ? s->height : 0,\n'
+        '\t\t\t    s ? s->pixelFormat : 0, s ? s->bytesPerRow : 0, sx, sy, get32(a, 8),\n'
+        '\t\t\t    get32(a, 12), dx, dy, w, h);\n'
+        '\t\t}\n',
+        '\t\tbool unusual = (layer > 0) || (mask != 1u) || !s ||\n'
+        '\t\t    s->pixelFormat != SWEET_FB_FORMAT_BGRA || s->bytesPerElement != 4 ||\n'
+        '\t\t    sx != 0 || sy != 0 || dx != 0 || dy != 0 ||\n'
+        '\t\t    (uint32_t)w != get32(a, 8) || (uint32_t)h != get32(a, 12) ||\n'
+        '\t\t    get32(a, 8) != fLogicalW || get32(a, 12) != fLogicalH;\n'
+        '\t\tif (sweet_fb_swaps_logged < 16 || (unusual && sweet_fb_swaps_logged < 128) ||\n'
+        '\t\t    (unusual && (sweet_fb_swap_count % 200) == 0)) {\n'
+        '\t\t\tsweet_fb_swaps_logged++;\n'
+        '\t\t\tIOLog("SWEET FB: swap %u mask=0x%x layer %u surface %u %ux%u fmt 0x%x bpe=%u bpr %u a %d,%d %ux%u b %d,%d %dx%d\\n",\n'
+        '\t\t\t    get32(rec, 0x50), mask, layer, id, s ? s->width : 0, s ? s->height : 0,\n'
+        '\t\t\t    s ? s->pixelFormat : 0, s ? s->bytesPerElement : 0, s ? s->bytesPerRow : 0,\n'
+        '\t\t\t    sx, sy, get32(a, 8), get32(a, 12), dx, dy, w, h);\n'
+        '\t\t}\n',
+        'SweetFramebuffer.cpp log multi-layer/scaled/non-BGRA swap geometry',
     )
     print(f'Applied PCLM10 SM8150 overlay cleanly onto {xnu}')
 
