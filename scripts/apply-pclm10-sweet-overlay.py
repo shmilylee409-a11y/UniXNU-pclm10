@@ -937,6 +937,14 @@ def apply_overlay(xnu: Path) -> None:
     )
     replace_exact(
         sweet_ufs,
+        'static int\nufs_find_partition(const char *want)',
+        'static int pclm10_ufs_write_raw_lba(uint64_t lba, uint32_t count);\n'
+        'static void pclm10_ufs_gpt_inspect_or_split(uint8_t *hdr_buf, uint64_t entry_lba, uint32_t nent, uint32_t esz);\n\n'
+        'static int\nufs_find_partition(const char *want)',
+        'sweet_ufs.c forward declarations',
+    )
+    replace_exact(
+        sweet_ufs,
         '\tif (memcmp(b, "EFI PART", 8) != 0) {\n\t\tprintf("SWEET UFS: LUN %u has no GPT\\n", su.lun);\n\t\treturn ENXIO;\n\t}',
         '\tif (memcmp(b, "EFI PART", 8) != 0) {\n\t\tprintf("SWEET UFS: LUN %u has no GPT\\n", su.lun);\n\t\treturn ENXIO;\n\t}\n'
         '\tstatic uint8_t pclm10_gpt_hdr[UFS_BLOCK];\n'

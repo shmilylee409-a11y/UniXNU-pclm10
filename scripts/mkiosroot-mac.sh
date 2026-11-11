@@ -29,7 +29,7 @@ WORK="$(mktemp -d /tmp/pclm10-iosroot.XXXXXX)"
 DEVS=()
 cleanup() {
 	for ((i=${#DEVS[@]}-1; i>=0; i--)); do
-		hdiutil detach "${DEVS[$i]}" -force >/dev/null 2>&1 || true
+		hdiutil detach "${DEVS[$i]}" -force >/dev/null 2>&1 || { sleep 1; hdiutil detach "${DEVS[$i]}" -force >/dev/null 2>&1 || true; }
 	done
 	rmdir "$WORK"/* "$WORK" 2>/dev/null || true
 }
@@ -124,11 +124,13 @@ done
 
 # Plain keybag for /defaults/no-effaceable-storage=1
 install -d -m 0700 -o 0 -g 0 "$ROOT_MNT/private/var/keybags"
-printf '%s\n' \
-	'<?xml version="1.0" encoding="UTF-8"?>' \
-	'<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
-	'<plist version="1.0"><dict><key>KeyBagKeys</key><data>U1dFRVQ=</data></dict></plist>' \
-	| install -m 0600 -o 0 -g 0 /dev/stdin "$ROOT_MNT/private/var/keybags/systembag.kb"
+cat > "$ROOT_MNT/private/var/keybags/systembag.kb" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>KeyBagKeys</key><data>U1dFRVQ=</data></dict></plist>
+EOF
+chown 0:0 "$ROOT_MNT/private/var/keybags/systembag.kb"
+chmod 0600 "$ROOT_MNT/private/var/keybags/systembag.kb"
 
 # Apply ios-sweet bring-up tweaks
 python3 "$SCRIPT_DIR/sweet/sweet-root-tweaks.py" "$ROOT_MNT"
