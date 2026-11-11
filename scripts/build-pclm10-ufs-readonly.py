@@ -83,7 +83,27 @@ static uint16_t sm8150UfsStream (void)
   uint32_t stream = 0x300U;
   PE_parse_boot_argn ("native-ufs-stream", &stream, sizeof (stream));
   return static_cast<uint16_t> (stream & 0x7fffU);
-}""",
+}
+static inline void pclm10UfsDelayUs (uint64_t us)
+{
+  uint64_t freq = 0, start = 0, now = 0;
+  __asm__ volatile ("isb\\n\\tmrs %0, cntfrq_el0" : "=r" (freq));
+  if (!freq) freq = 19200000ULL;
+  uint64_t ticks = (freq * us + 999999ULL) / 1000000ULL;
+  __asm__ volatile ("isb\\n\\tmrs %0, cntvct_el0" : "=r" (start));
+  for (;;) {
+    __asm__ volatile ("isb\\n\\tmrs %0, cntvct_el0" : "=r" (now));
+    if ((now - start) >= ticks) break;
+  }
+}
+#ifdef IODelay
+#undef IODelay
+#endif
+#define IODelay(us) pclm10UfsDelayUs (static_cast<uint64_t> (us))
+#ifdef IOSleep
+#undef IOSleep
+#endif
+#define IOSleep(ms) pclm10UfsDelayUs (static_cast<uint64_t> (ms) * 1000ULL)""",
         "sm8150UfsStream helper",
     )
 
@@ -166,7 +186,7 @@ static uint16_t sm8150UfsStream (void)
   IOBufferMemoryDescriptor *allocDesc = nullptr;
   uint8_t *virt = nullptr;
   uint64_t phys = 0;
-  if (!forceAlloc && fwList && !(fwList & 0xfff)) {
+  if (!forceAlloc && fwList && !(fwList & 0xfff) && (fwList < 0xffffc000ULL || fwList >= 0x100000000ULL)) {
     IOMemoryDescriptor *region = IOMemoryDescriptor::withPhysicalAddress (fwList, 16384, kIODirectionInOut);
     if (region) {
       regionMap = OSSharedPtr<IOMemoryMap> (region->map (kIOMapAnywhere), OSNoRetain);
