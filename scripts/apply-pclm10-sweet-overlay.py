@@ -28,6 +28,7 @@ PCLM10_RESET_C = r'''/*
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
 extern void thread_deallocate(thread_t);
+extern int hz;
 extern uint64_t sweet_usb_rx_count(void);
 
 void pclm10_reset_premap(void);

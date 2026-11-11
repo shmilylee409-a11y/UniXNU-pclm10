@@ -43,8 +43,17 @@ jobs:
 
       - name: patch DarwinBoot 32MB alignment
         run: |
-          git -C UniXNU/drivers/DarwinBoot apply --check "$GITHUB_WORKSPACE/device/patches/darwinboot-32mb.patch"
-          git -C UniXNU/drivers/DarwinBoot apply "$GITHUB_WORKSPACE/device/patches/darwinboot-32mb.patch"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('UniXNU/drivers/DarwinBoot/DarwinBootPkg/Driver/DarwinBoot.c')
+          text = p.read_text(encoding='utf-8')
+          old = '#define BLOCK_SIZE   SIZE_2MB'
+          new = '#define BLOCK_SIZE   SIZE_32MB'
+          cnt = text.count(old)
+          assert cnt == 1, f'Expected 1 BLOCK_SIZE match in DarwinBoot.c, got {cnt}'
+          p.write_text(text.replace(old, new, 1), encoding='utf-8')
+          print('Patched DarwinBoot.c BLOCK_SIZE -> SIZE_32MB')
+          PY
 
       - name: checkout uefi-sheng
         uses: actions/checkout@v4
