@@ -1,0 +1,169 @@
+name: sweet-16k
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_uefi:
+        description: Build uefi-pclm10 with 32 MiB DarwinBoot alignment
+        type: boolean
+        default: true
+      build_xnu:
+        description: Build xnu-8796 (ios-sweet + PCLM10 SM8150 overlay) on macos-14
+        type: boolean
+        default: true
+
+concurrency:
+  group: sweet-16k-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  uefi:
+    if: ${{ inputs.build_uefi != false }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: checkout device
+        uses: actions/checkout@v4
+        with:
+          path: device
+
+      - name: checkout UniXNU
+        uses: actions/checkout@v4
+        with:
+          repository: UniXNU/UniXNU
+          ref: 95ad7812c464f8a4c5e4120c993c3be3cc72e0fd
+          path: UniXNU
+
+      - name: init UniXNU submodules
+        working-directory: UniXNU
+        run: |
+          for sub in $(git config --file .gitmodules --get-regexp path | awk '{print $2}'); do
+            git submodule update --init --recursive "$sub" || git submodule update --init --remote "$sub" || true
+          done
+
+      - name: patch DarwinBoot 32MB alignment
+        run: |
+          git -C UniXNU/drivers/DarwinBoot apply --check "$GITHUB_WORKSPACE/device/patches/darwinboot-32mb.patch"
+          git -C UniXNU/drivers/DarwinBoot apply "$GITHUB_WORKSPACE/device/patches/darwinboot-32mb.patch"
+
+      - name: checkout uefi-sheng
+        uses: actions/checkout@v4
+        with:
+          repository: UniXNU/uefi-sheng
+          path: uefi-pclm10
+
+      - name: restore linux toolchain cache
+        id: cache-tc
+        uses: actions/cache/restore@v4
+        with:
+          path: /opt/unixnu-linux
+          key: unixnu-linux-tc-${{ runner.os }}-v1
+
+      - name: setup linux toolchain and host tools
+        run: |
+          sudo python3 UniXNU/scripts/linux/setup-toolchain.py /opt/unixnu-linux
+          sudo chown -R "$(id -u):$(id -g)" /opt/unixnu-linux
+          sudo apt-get install -y lld llvm uuid-dev
+          for t in clang lld-link llvm-lib llvm-rc llvm-nm llvm-objcopy dtc fdtget fdtput make mformat mcopy python3; do
+            command -v "$t" >/dev/null || { echo "missing tool: $t"; exit 1; }
+          done
+
+      - name: save linux toolchain cache
+        if: steps.cache-tc.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /opt/unixnu-linux
+          key: unixnu-linux-tc-${{ runner.os }}-v1
+
+      - name: build uefi-pclm10 (SIZE_32MB DarwinBoot)
+        run: |
+          python3 device/scripts/prepare-pclm10-uefi.py \
+            --uefi uefi-pclm10 \
+            --device device \
+            --tree UniXNU
+          python3 UniXNU/unixnu build firmware -D device --uefi uefi-pclm10
+          mkdir -p out-uefi
+          cp uefi-pclm10/Build/pclm10Pkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd out-uefi/
+          python3 UniXNU/unixnu bootimg -D device --uefi uefi-pclm10 \
+            --fd out-uefi/SILICIUM_UEFI.fd \
+            --dtb device/dts/oppo-pclm10-19081.dtb \
+            --ramdisk none \
+            -o out-uefi/boot-uefi-32m.img
+          ls -lh out-uefi/
+
+      - name: upload uefi-pclm10-32m
+        uses: actions/upload-artifact@v4
+        with:
+          name: uefi-pclm10-32m
+          path: out-uefi/
+          retention-days: 7
+
+  xnu:
+    if: ${{ inputs.build_xnu != false }}
+    runs-on: macos-14
+    timeout-minutes: 120
+    env:
+      SWEET_SHA: 45263bee51df4a0f55cdf9c649af886399488ddb
+      DXB_REPO: https://github.com/blacktop/darwin-xnu-build
+      DXB_SHA: 663906528d1cd5ea8fde7de6f16de73db9511549
+      MACOS_VERSION: "13.5"
+      KERNEL_CONFIG: DEVELOPMENT
+      MACHINE_CONFIG: SWEET
+    steps:
+      - name: checkout device
+        uses: actions/checkout@v4
+        with:
+          path: device
+
+      - name: fetch ios-sweet and darwin-xnu-build
+        run: |
+          git init -q ios-sweet
+          git -C ios-sweet fetch -q --depth 1 https://github.com/dipa-studio/ios-sweet.git "$SWEET_SHA"
+          git -C ios-sweet checkout -q FETCH_HEAD
+
+          git init -q dxb
+          git -C dxb fetch -q --depth 1 "$DXB_REPO" "$DXB_SHA"
+          git -C dxb checkout -q FETCH_HEAD
+
+          cp ios-sweet/xnu/patches/*.patch ios-sweet/xnu/patches/*.sh dxb/patches/
+          sed -i '' 's/ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"/ARCHS="x86_64 arm64e arm64" VALID_ARCHS="x86_64 arm64e arm64"/' dxb/build.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          p = Path('dxb/build.sh')
+          text = p.read_text()
+          anchor = '        cd "${WORK_DIR}"\n    fi'
+          overlay = str(Path(os.environ['GITHUB_WORKSPACE']) / 'device/scripts/apply-pclm10-sweet-overlay.py')
+          inject = f'        python3 "{overlay}" --xnu "${{WORK_DIR}}/xnu"\n' + anchor
+          assert text.count(anchor) == 1, 'anchor mismatch in dxb/build.sh'
+          p.write_text(text.replace(anchor, inject, 1))
+          PY
+
+      - name: setup deps and Xcode 15
+        run: |
+          brew install jq gum bash cmake ninja
+          printf '#!/bin/sh\nexit 0\n' | sudo tee /usr/local/bin/xcodes >/dev/null
+          sudo chmod +x /usr/local/bin/xcodes
+          XC=$(ls -d /Applications/Xcode_*.app | sort -V | head -1)
+          echo "DEVELOPER_DIR=$XC/Contents/Developer" >> "$GITHUB_ENV"
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
+          xcrun --find iig
+
+      - name: build xnu-8796 (SWEET + PCLM10)
+        working-directory: dxb
+        run: bash build.sh
+
+      - name: collect kernel
+        run: |
+          mkdir -p out-xnu
+          cp -R dxb/fakeroot/System/Library/Kernels/. out-xnu/
+          ls -lh out-xnu/
+          (cd out-xnu && shasum -a 256 kernel.* > SHA256SUMS)
+
+      - name: upload sweet-xnu-pclm10
+        uses: actions/upload-artifact@v4
+        with:
+          name: sweet-xnu-pclm10
+          path: out-xnu/
+          retention-days: 7

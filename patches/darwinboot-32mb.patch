@@ -1,0 +1,19 @@
+diff --git a/DarwinBootPkg/Driver/DarwinBoot.c b/DarwinBootPkg/Driver/DarwinBoot.c
+index 109479e..84dc657 100644
+--- a/DarwinBootPkg/Driver/DarwinBoot.c
++++ b/DarwinBootPkg/Driver/DarwinBoot.c
+@@ -22,7 +22,12 @@
+ #include "LoaderInputs.h"
+ 
+ #define WINDOW_SIZE  SIZE_256MB
+-#define BLOCK_SIZE   SIZE_2MB
++//
++// The kernel's bootstrap page tables use 2 MiB L2 blocks on a 4 KiB build
++// and 32 MiB L2 blocks on a 16 KiB build; 32 MiB covers both because it is a
++// multiple of 2 MiB. The physical base must be congruent to the kernel's
++// virtual base modulo that block size.
++//
++#define BLOCK_SIZE   SIZE_32MB
+ // The largest kernel file read: the default window. A macOS kernel collection is about 137 MiB; the window check
+ // below still bounds the kernel with everything placed after it.
+ #define KERNEL_LIMIT SIZE_256MB
