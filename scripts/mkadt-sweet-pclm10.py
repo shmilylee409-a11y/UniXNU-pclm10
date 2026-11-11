@@ -114,7 +114,7 @@ def build(
                 [
                     ph(),
                     ("device_type", cstr("cpu")),
-                    ("compatible", cstr("qcom,kryo485") + cstr("ARM,v8")),
+                    ("compatible", cstr("qcom,kryo470") + cstr("qcom,kryo485") + cstr("ARM,v8")),
                     ("reg", u32(core << 8)),
                     ("cpu-id", u32(core)),
                     ("cluster-id", u32(0)),
