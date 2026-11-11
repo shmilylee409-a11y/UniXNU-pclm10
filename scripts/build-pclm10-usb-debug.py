@@ -83,6 +83,31 @@ SM8150_H = """/* SPDX-License-Identifier: MIT
 #endif
 """
 
+FAIL_SNAP_ANCHOR = """        if (native.core_initialized && native.core) {
+            struct dwc3_snapshot snap;"""
+
+FAIL_SNAP_REPLACEMENT = """        if (native.core && (native.core_initialized || error == QCOM_USB_DEBUG_CORE_INIT_FAILED)) {
+            struct dwc3_snapshot snap;"""
+
+DWC3_RST_ANCHOR = """    wr(d, DWC3_DCTL, rd(d, DWC3_DCTL) | DWC3_DCTL_CSFTRST);
+    if (wait_mask(d, DWC3_DCTL, DWC3_DCTL_CSFTRST, 0)) return -3;
+    wr(d, DWC3_DEVTEN, 0); wr(d, DWC3_DALEPENA, 0);"""
+
+DWC3_RST_REPLACEMENT = """    wr(d, DWC3_DCTL, rd(d, DWC3_DCTL) | DWC3_DCTL_CSFTRST);
+    if (wait_mask(d, DWC3_DCTL, DWC3_DCTL_CSFTRST, 0)) return -3;
+    /* SM8150 PHY settle + disable SS/HS PHY suspend before DEPCMD (sm8150.dtsi quirks). */
+    for (ep = 0; ep < 5u; ep++) d->io.delay_us(d->io.cookie, 10000u);
+    wr(d, DWC3_GUSB3PIPECTL(0), rd(d, DWC3_GUSB3PIPECTL(0)) & ~(DWC3_GUSB3PIPECTL_SUSPHY | (1u << 27)));
+    wr(d, DWC3_GUSB2PHYCFG(0), rd(d, DWC3_GUSB2PHYCFG(0)) & ~(DWC3_GUSB2PHYCFG_SUSPHY | (1u << 8)));
+    wr(d, DWC3_DEVTEN, 0); wr(d, DWC3_DALEPENA, 0);"""
+
+DWC3_GCTL_ANCHOR = """    wr(d, DWC3_GCTL, (rd(d, DWC3_GCTL) & ~(DWC3_GCTL_PRTCAPDIR(3) |
+         DWC3_GCTL_GBLHIBERNATIONEN)) | DWC3_GCTL_PRTCAPDIR(DWC3_GCTL_PRTCAP_DEVICE));"""
+
+DWC3_GCTL_REPLACEMENT = """    wr(d, DWC3_GCTL, (rd(d, DWC3_GCTL) & ~(DWC3_GCTL_PRTCAPDIR(3) |
+         DWC3_GCTL_GBLHIBERNATIONEN)) | DWC3_GCTL_PRTCAPDIR(DWC3_GCTL_PRTCAP_DEVICE) |
+         DWC3_GCTL_DSBLCLKGTNG);"""
+
 PANIC_INACTIVE_ANCHOR = """    /* panic_spin_forever can precede CPU-data initialization. Inactive USB
      * must not call cpu_number(), touch MMIO or acquire a guard in that case. */
     if (native.status.phase != QCOM_USB_DEBUG_ACTIVE || !acquire(&flags)) return;"""
@@ -181,13 +206,26 @@ def prepare_source(src_dir: Path, dst_dir: Path) -> None:
 
     qud_c = dst_dir / "kernel/QcomXnuUsbDebug.c"
     text = qud_c.read_text(encoding="utf-8")
-    if text.count(PANIC_INACTIVE_ANCHOR) != 1:
-        raise SystemExit("Expected exactly 1 match for PANIC_INACTIVE_ANCHOR in QcomXnuUsbDebug.c")
-    if text.count(PANIC_CTL_ANCHOR) != 1:
-        raise SystemExit("Expected exactly 1 match for PANIC_CTL_ANCHOR in QcomXnuUsbDebug.c")
-    text = text.replace(PANIC_INACTIVE_ANCHOR, PANIC_INACTIVE_REPLACEMENT, 1)
-    text = text.replace(PANIC_CTL_ANCHOR, PANIC_CTL_REPLACEMENT, 1)
+    for anchor, repl, label in (
+        (FAIL_SNAP_ANCHOR, FAIL_SNAP_REPLACEMENT, "FAIL_SNAP_ANCHOR"),
+        (PANIC_INACTIVE_ANCHOR, PANIC_INACTIVE_REPLACEMENT, "PANIC_INACTIVE_ANCHOR"),
+        (PANIC_CTL_ANCHOR, PANIC_CTL_REPLACEMENT, "PANIC_CTL_ANCHOR"),
+    ):
+        if text.count(anchor) != 1:
+            raise SystemExit(f"Expected exactly 1 match for {label} in QcomXnuUsbDebug.c")
+        text = text.replace(anchor, repl, 1)
     qud_c.write_text(text, encoding="utf-8")
+
+    dwc3_c = dst_dir / "usb/Dwc3.c"
+    dtext = dwc3_c.read_text(encoding="utf-8")
+    for anchor, repl, label in (
+        (DWC3_RST_ANCHOR, DWC3_RST_REPLACEMENT, "DWC3_RST_ANCHOR"),
+        (DWC3_GCTL_ANCHOR, DWC3_GCTL_REPLACEMENT, "DWC3_GCTL_ANCHOR"),
+    ):
+        if dtext.count(anchor) != 1:
+            raise SystemExit(f"Expected exactly 1 match for {label} in Dwc3.c")
+        dtext = dtext.replace(anchor, repl, 1)
+    dwc3_c.write_text(dtext, encoding="utf-8")
 
 
 def main() -> int:

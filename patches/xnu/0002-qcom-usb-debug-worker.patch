@@ -14,7 +14,7 @@
  
  #if (DEVELOPMENT || DEBUG)
  #include <kern/debug.h>
-@@ -1287,13 +1294,252 @@ bsdinit_task
+@@ -1287,13 +1294,170 @@ bsdinit_task
  
  	load_init_program(p);
  	lock_trace = 1;
@@ -23,6 +23,7 @@
 +#if XNU_QCOM_USB_DEBUG
 +extern char pclm10_usb_persist_line[384];
 +extern int boot_reset_bootloader(char *, unsigned);
++extern void pclm10_delay_ms(uint32_t ms);
 +/* Exactly the Mach-private prototypes the worker needs, spelled here because
 + * this translation unit does not define MACH_KERNEL_PRIVATE (checked in
 + * bsd/DEVELOPMENT/bsd_init.o.json).  Using the real headers instead would
@@ -34,106 +35,24 @@
 + * initialization, allocation, IRQ handler, filesystem or display dependency.
 + * States: 0 unstarted, 1 creating, 2 running, 3 start/bind failure, 4 stopped.
 + */
-+static unsigned int qcom_usb_worker_state;
-+/* Reboot states: 0 unstarted, 1 creating, 2 active, 3 start failure, 4 ended. */
-+static unsigned int qcom_usb_reboot_state;
+++static unsigned int qcom_usb_worker_state;
 +
-+/* The USB worker keeps running while this separate normal thread waits for the
-+ * acknowledged frame and queued console bytes to leave the CDC transport, then
-+ * reaches reboot_kernel through the regular shutdown path. */
-+static void
-+qcom_usb_reboot_worker(void *argument __unused, wait_result_t result __unused)
-+{
-+	processor_t processor = cpu_to_processor(master_cpu);
-+	int reboot_result;
-+
-+	thread_set_thread_name(current_thread(), "qcom-usb-reboot");
-+	if (processor == PROCESSOR_NULL) {
-+		qcom_usb_debug_control_reboot_failed(-1);
-+		goto out;
-+	}
-+	thread_bind(processor);
-+	thread_block(THREAD_CONTINUE_NULL);
-+	if (cpu_number() != master_cpu) {
-+		qcom_usb_debug_control_reboot_failed(-2);
-+		goto out;
-+	}
-+	if (!qcom_usb_debug_wait_drained(2000)) {
-+		qcom_usb_debug_control_reboot_failed(-3);
-+		goto out;
-+	}
-+	if (!qcom_usb_debug_control_arm_reboot()) {
-+		qcom_usb_debug_control_reboot_failed(-4);
-+		goto out;
-+	}
-+	/* Reset directly instead of through reboot_kernel. Measured 2026-10-27:
-+	 * reboot_kernel unmounts every filesystem first, and vfs_unmountall panics on this
-+	 * board inside apfs_unmount's vflush (vnode_rele_ext usecount -ve at vfs_subr.c:2692),
-+	 * because the SystemOS union mount drops one reference on the root vnode too many.
-+	 * That panic lands before the reset, so the IMEM reason cell never gets written and
-+	 * the phone cannot return to fastboot. This path writes the cell and resets with no
-+	 * filesystem work. It does not return. */
-+	(void)reboot_result;
-+	qcom_usb_debug_control_reset_now();
-+
-+out:
-+	__atomic_store_n(&qcom_usb_reboot_state, 4u, __ATOMIC_RELEASE);
-+	thread_bind(PROCESSOR_NULL);
-+	thread_terminate_self();
- }
- 
++/* Wait for queued USB traffic to drain and reset straight to fastboot on the
++ * current master-bound worker thread (avoiding unscheduled timer blocks). */
 +static void
 +qcom_usb_start_reboot_once(void)
 +{
-+	thread_t thread = THREAD_NULL;
-+	unsigned int state, running = 1u;
-+	kern_return_t result;
-+
 +	if (!qcom_usb_debug_control_take_reboot()) {
 +		return;
 +	}
-+	for (;;) {
-+		state = __atomic_load_n(&qcom_usb_reboot_state, __ATOMIC_ACQUIRE);
-+		if (state != 0u && state != 3u && state != 4u) {
-+			/* A live request stays strictly single-instance; a completed
-+			 * failure may be reused by a fresh request.
-+			 */
-+			qcom_usb_debug_control_reboot_failed(-6);
-+			return;
-+		}
-+		if (__atomic_compare_exchange_n(&qcom_usb_reboot_state, &state, 1u,
-+		    0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-+			break;
-+		}
++	(void)qcom_usb_debug_wait_drained(2000);
++	if (!qcom_usb_debug_control_arm_reboot()) {
++		qcom_usb_debug_control_reboot_failed(-4);
++		return;
 +	}
-+	result = kernel_thread_start(qcom_usb_reboot_worker, NULL, &thread);
-+	if (result == KERN_SUCCESS) {
-+		(void)__atomic_compare_exchange_n(&qcom_usb_reboot_state, &running,
-+		    2u, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
-+		thread_deallocate(thread);
-+	} else {
-+		__atomic_store_n(&qcom_usb_reboot_state, 3u, __ATOMIC_RELEASE);
-+		qcom_usb_debug_control_reboot_failed(result);
-+		kprintf("QCOM USB REBOOT start failed kr=%d\n", result);
-+	}
-+}
-+
-+static void
-+qcom_usb_worker_wait(void)
-+{
-+	uint64_t deadline;
-+
-+	/* Unlike delay_for_interval this never selects a CPU-latency spin path.
-+	 * Reached only in normal thread context, with preemption enabled and
-+	 * outside every USB guard.
-+	 */
-+	clock_interval_to_deadline(5, NSEC_PER_MSEC, &deadline);
-+	if (assert_wait_deadline((event_t)&qcom_usb_worker_state,
-+	    THREAD_UNINT, deadline) == THREAD_WAITING) {
-+		thread_block(THREAD_CONTINUE_NULL);
-+	}
-+}
-+
++	qcom_usb_debug_control_reset_now();
+ }
+ 
 +static void
 +qcom_usb_worker(void *argument __unused, wait_result_t result __unused)
 +{
@@ -161,20 +80,19 @@
 +	}
 +
 +	qcom_usb_debug_get_status(&status);
-+	printf("PCLM10 USB: %s (phase=%u err=%u qcom=%u dom=%u stg=%u)\n",
++	printf("PCLM10 USB: %s (phase=%u err=%u qcom=%u dom=%u stg=%u lt=%u a=%x b=%x tr=%u)\n",
 +	    pclm10_usb_persist_line[0] ? pclm10_usb_persist_line : "(empty)",
 +	    status.phase, status.error, status.qcom_result,
-+	    status.domain_result, status.domain_stage);
++	    status.domain_result, status.domain_stage,
++	    status.last_trace, status.trace_a, status.trace_b, status.traces);
 +	unsigned int autoreset_sec = 0;
 +	(void)PE_parse_boot_argn("pclm10-autoreset", &autoreset_sec, sizeof(autoreset_sec));
 +	if (status.phase != QCOM_USB_DEBUG_ACTIVE) {
 +		kprintf("QCOM USB WORKER unavailable phase=%u error=%u\n", status.phase, status.error);
 +		if (autoreset_sec > 0u) {
-+			unsigned int wait_sec = autoreset_sec < 10u ? autoreset_sec : 10u;
-+			printf("PCLM10 AUTORESET: USB refused; rebooting to fastboot in %us\n", wait_sec);
-+			for (unsigned int w = 0; w < wait_sec * 200u; ++w) {
-+				qcom_usb_worker_wait();
-+			}
++			unsigned int wait_sec = autoreset_sec < 8u ? autoreset_sec : 8u;
++			printf("PCLM10 AUTORESET: USB refused; rebooting to fastboot in %us (CNTVCT)\n", wait_sec);
++			pclm10_delay_ms(wait_sec * 1000u);
 +			char rbuf[160];
 +			(void)boot_reset_bootloader(rbuf, sizeof(rbuf));
 +			printf("PCLM10 AUTORESET failed: %s\n", rbuf);
@@ -219,7 +137,7 @@
 +			printf("PCLM10 AUTORESET failed: %s\n", rbuf);
 +			break;
 +		}
-+		qcom_usb_worker_wait();
++		pclm10_delay_ms(5u);
 +	}
 +
 +stopped:

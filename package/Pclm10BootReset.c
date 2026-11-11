@@ -255,6 +255,14 @@ static int pon_mark_bootloader(uint8_t *out_subtype, uint8_t *out_before,
 
 int boot_reset_bootloader(char *text, unsigned cap);
 void boot_progress_persist(const char *line, uint32_t color);
+void pclm10_delay_ms(uint32_t ms);
+
+void pclm10_delay_ms(uint32_t ms)
+{
+	for (uint32_t i = 0; i < ms; ++i) {
+		udelay_cntvct(1000u);
+	}
+}
 
 char pclm10_usb_persist_line[384];
 uint32_t pclm10_usb_persist_color;
