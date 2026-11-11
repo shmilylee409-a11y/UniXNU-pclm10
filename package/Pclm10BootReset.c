@@ -320,6 +320,22 @@ int boot_reset_bootloader(char *text, unsigned cap)
 	int pon_rc = -1;
 	int pon_ok = pon_mark_bootloader(&pon_sub, &pon_before, &pon_after, &pon_rc);
 
+	// Mask interrupts and pre-arm APSS KPSS watchdog (~375ms at 32.768kHz) BEFORE
+	// SMC calls: under SMP (cpus=4), EL3 SCM/PSCI reset can stall when secondary
+	// cores are active; the pre-armed WDT guarantees SoC reset into fastboot
+	// since IMEM and PMIC PON_SPARE bootloader markers are already committed.
+	__asm__ volatile("msr daifset, #0xf" ::: "memory");
+	volatile uint8_t *wdt = br_cached_wdt;
+	if (wdt) {
+		*(volatile uint32_t *)(wdt + BR_WDT_EN)   = 0u;
+		*(volatile uint32_t *)(wdt + BR_WDT_RST)  = 1u;
+		*(volatile uint32_t *)(wdt + BR_WDT_BARK) = 0x2000u;
+		*(volatile uint32_t *)(wdt + BR_WDT_BITE) = 0x3000u;
+		*(volatile uint32_t *)(wdt + BR_WDT_EN)   = 1u;
+		*(volatile uint32_t *)(wdt + BR_WDT_RST)  = 1u;
+		__asm__ volatile("dsb sy" ::: "memory");
+	}
+
 	uint64_t arb = scm_pwr(0x1ULL, 0ULL);
 	uint64_t psr = scm_pwr(0x2ULL, 0ULL);
 	(void)smc_psci(PSCI_SYSTEM_RESET, 0ULL);
@@ -329,20 +345,7 @@ int boot_reset_bootloader(char *text, unsigned cap)
 		*pshold = 0u;
 		__asm__ volatile("dsb sy" ::: "memory");
 	}
-	udelay_cntvct(150000u);
-
-	// Fallback if SCM/PSCI/PS_HOLD all returned: force APSS KPSS watchdog bite (~31ms).
-	volatile uint8_t *wdt = br_cached_wdt;
-	if (wdt) {
-		*(volatile uint32_t *)(wdt + BR_WDT_EN)   = 0u;
-		*(volatile uint32_t *)(wdt + BR_WDT_RST)  = 1u;
-		*(volatile uint32_t *)(wdt + BR_WDT_BARK) = 0x400u;
-		*(volatile uint32_t *)(wdt + BR_WDT_BITE) = 0x800u;
-		*(volatile uint32_t *)(wdt + BR_WDT_EN)   = 1u;
-		*(volatile uint32_t *)(wdt + BR_WDT_RST)  = 1u;
-		__asm__ volatile("dsb sy" ::: "memory");
-		udelay_cntvct(500000u);
-	}
+	udelay_cntvct(500000u);
 
 	br_puts(&w, "reset returned imem=");
 	br_puthex(&w, imem_after, 8);

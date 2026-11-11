@@ -967,8 +967,337 @@ def apply_overlay(xnu: Path) -> None:
     replace_exact(
         sweet_ufs,
         '\t/* Input drivers (HID services in iokit/Kernel/arm/hid/SweetHID.cpp). */\n\tsweet_keys_init();\n\tsweet_touch_init();',
-        '\t/* Input drivers: disabled by default on PCLM10 SM8150 until S3706/PM8150 support is wired. */\n\tuint32_t enable_keys = 0, enable_touch = 0;\n\tPE_parse_boot_argn("sweetkeys", &enable_keys, sizeof(enable_keys));\n\tPE_parse_boot_argn("sweettouch", &enable_touch, sizeof(enable_touch));\n\tif (enable_keys) sweet_keys_init();\n\tif (enable_touch) sweet_touch_init();',
-        'sweet_ufs.c gate SM7150 keys/touch',
+        '\t/* Input drivers: enabled on PCLM10 via sweetkeys=1 / sweettouch=1 boot-args. */\n\tuint32_t enable_keys = 0, enable_touch = 0;\n\tPE_parse_boot_argn("sweetkeys", &enable_keys, sizeof(enable_keys));\n\tPE_parse_boot_argn("sweettouch", &enable_touch, sizeof(enable_touch));\n\tif (enable_keys) sweet_keys_init();\n\tif (enable_touch) sweet_touch_init();',
+        'sweet_ufs.c gate PCLM10 keys/touch',
+    )
+
+    # 5b. Adapt sweet_rpmh.c, sweet_keys.c, and sweet_touch.c for PCLM10 (SM8150: PM8150 + S3706 on QUPv3 SE17)
+    sweet_rpmh = xnu / 'bsd/dev/sweet_rpmh.c'
+    replace_exact(
+        sweet_rpmh,
+        '\tif (!res || strcmp(res, "ldoc11") || mv < 2950 || mv > 3400) {\n'
+        '\t\tprintf("SWEET RPMH: expected ldoc11 and 2950..3400 mV\\n");\n'
+        '\t\treturn EINVAL;\n'
+        '\t}',
+        '\tif (!res || (strcmp(res, "ldoc11") != 0 && strcmp(res, "ldoa17") != 0) || mv < 2700 || mv > 3400) {\n'
+        '\t\tprintf("SWEET RPMH: expected ldoc11/ldoa17 and 2700..3400 mV\\n");\n'
+        '\t\treturn EINVAL;\n'
+        '\t}',
+        'sweet_rpmh.c allow ldoa17 for PCLM10',
+    )
+
+    sweet_keys = xnu / 'bsd/dev/sweet_keys.c'
+    replace_exact(
+        sweet_keys,
+        '#define KEYS_GPIO_RT     0xc110u',
+        '#define KEYS_GPIO_RT     0xc510u',
+        'sweet_keys.c PM8150 GPIO6 RT_STS',
+    )
+    replace_exact(
+        sweet_keys,
+        '\tkeys_gpio_apid = keys_find_apid(0x4c1, count);\n'
+        '\tuint8_t pon = 0, gpio = 0, mode = 0, en = 0, subtype = 0;\n'
+        '\tbool pok = keys_read(keys_pon_apid, KEYS_PON_RT, &pon);\n'
+        '\tbool gok = keys_read(keys_gpio_apid, KEYS_GPIO_RT, &gpio);\n'
+        '\tbool mok = keys_read(keys_gpio_apid, 0xc140, &mode);\n'
+        '\tbool eok = keys_read(keys_gpio_apid, 0xc146, &en);\n'
+        '\tbool sok = keys_read(keys_gpio_apid, 0xc105, &subtype);',
+        '\tkeys_gpio_apid = keys_find_apid(0x0c5, count);\n'
+        '\tuint8_t pon = 0, gpio = 0, mode = 0, en = 0, subtype = 0;\n'
+        '\tbool pok = keys_read(keys_pon_apid, KEYS_PON_RT, &pon);\n'
+        '\tbool gok = keys_read(keys_gpio_apid, KEYS_GPIO_RT, &gpio);\n'
+        '\tbool mok = keys_read(keys_gpio_apid, 0xc540, &mode);\n'
+        '\tbool eok = keys_read(keys_gpio_apid, 0xc546, &en);\n'
+        '\tbool sok = keys_read(keys_gpio_apid, 0xc505, &subtype);',
+        'sweet_keys.c PM8150 SID0 GPIO6 (PPID 0x0c5) vol_up',
+    )
+
+    sweet_touch = xnu / 'bsd/dev/sweet_touch.c'
+    replace_exact(
+        sweet_touch,
+        '#define TOUCH_SE_PA      0x00a84000u\n'
+        '#define TOUCH_GCC_PA     0x00100000u\n'
+        '#define TOUCH_NORTH_PA   0x03900000u /* DT TLMM + NORTH (0x500000) */\n'
+        '#define TOUCH_GCC_VOTE   0x5200cu\n'
+        '#define TOUCH_RCG       0x18148u    /* wrapper1 LOCAL S1 = global SE7 */\n'
+        '#define TOUCH_GPIO_CFG(n) ((uint32_t)(n) * 0x1000u)\n'
+        '#define TOUCH_GPIO_IO(n)  (TOUCH_GPIO_CFG(n) + 4u)\n'
+        '#define TOUCH_MAX        10u\n'
+        '#define TOUCH_GOODIX     1\n'
+        '#define TOUCH_FTS        2',
+        '#define TOUCH_SE_PA      0x00c80000u /* PCLM10 DT qupv3_se17_i2c (wrap2 S0) */\n'
+        '#define TOUCH_GCC_PA     0x00100000u\n'
+        '#define TOUCH_SOUTH_PA   0x03d00000u /* SM8150 TLMM SOUTH tile (GPIO 54/55/56/122) */\n'
+        '#define TOUCH_GCC_VOTE   0x52014u    /* gcc_qupv3_wrap2 vote reg */\n'
+        '#define TOUCH_RCG       0x1e148u    /* gcc_qupv3_wrap2_s0_clk_src */\n'
+        '#define TOUCH_GPIO_CFG(n) ((uint32_t)(n) * 0x1000u)\n'
+        '#define TOUCH_GPIO_IO(n)  (TOUCH_GPIO_CFG(n) + 4u)\n'
+        '#define TOUCH_MAX        10u\n'
+        '#define TOUCH_GOODIX     1\n'
+        '#define TOUCH_FTS        2\n'
+        '#define TOUCH_SYNAPTICS  3',
+        'sweet_touch.c PCLM10 SE17 + TLMM SOUTH + GCC wrap2 S0 constants',
+    )
+    replace_exact(
+        sweet_touch,
+        '\t/* Vote on only wrapper1 and SE7, preserving other clock users. */\n'
+        '\tuint32_t mask = (0x0fu << 18) | (1u << 23);\n'
+        '\ttouch_wr(st.gcc, TOUCH_GCC_VOTE, touch_rd(st.gcc, TOUCH_GCC_VOTE) | mask);',
+        '\t/* Vote on wrap2 s_ahb (bit 1), m_ahb (bit 2), and s0 (bit 4). */\n'
+        '\tuint32_t mask = (1u << 1) | (1u << 2) | (1u << 4);\n'
+        '\ttouch_wr(st.gcc, TOUCH_GCC_VOTE, touch_rd(st.gcc, TOUCH_GCC_VOTE) | mask);',
+        'sweet_touch.c GCC wrap2 clock vote',
+    )
+    replace_exact(
+        sweet_touch,
+        '\tconst uint32_t branches[] = {0x18004, 0x18008, 0x1800c, 0x18010, 0x18144};',
+        '\tconst uint32_t branches[] = {0x1e004, 0x1e008, 0x1e144};',
+        'sweet_touch.c GCC wrap2 branch halt regs',
+    )
+    replace_exact(
+        sweet_touch,
+        '\tint x[TOUCH_MAX], y[TOUCH_MAX];\n} st;',
+        '\tint x[TOUCH_MAX], y[TOUCH_MAX];\n'
+        '\tuint8_t syn_f01_data, syn_f12_data, syn_f12_d1_off, syn_f12_n, syn_f12_irq_mask;\n'
+        '\tuint16_t syn_max_x, syn_max_y;\n} st;',
+        'sweet_touch.c Synaptics S3706 state fields',
+    )
+    replace_exact(
+        sweet_touch,
+        'static bool\ntouch_se_init(void)',
+        'static int\ntouch_write1(uint8_t addr, uint8_t reg, uint8_t val)\n{\n'
+        '\tuint8_t tx[2] = {reg, val};\n'
+        '\treturn touch_msg(addr, tx, sizeof(tx), NULL, 0, false);\n'
+        '}\n\n'
+        'static bool\ntouch_synaptics_probe(void)\n{\n'
+        '\tif (touch_write1(0x20, 0xff, 0x00) != 0) {\n'
+        '\t\treturn false;\n'
+        '\t}\n'
+        '\tuint8_t f01_q = 0, f01_c = 0, f01_d = 0;\n'
+        '\tuint8_t f12_q = 0, f12_c = 0, f12_d = 0, f12_irq = 0;\n'
+        '\tunsigned irq_bit = 0;\n'
+        '\tfor (unsigned addr = 0xe9; addr >= 0x80; addr -= 6u) {\n'
+        '\t\tuint8_t pdt[6] = {0};\n'
+        '\t\tif (touch_read(0x20, (uint16_t)addr, false, pdt, sizeof(pdt)) != 0) {\n'
+        '\t\t\treturn false;\n'
+        '\t\t}\n'
+        '\t\tif (pdt[5] == 0x00) {\n'
+        '\t\t\tbreak;\n'
+        '\t\t}\n'
+        '\t\tunsigned nsrc = pdt[4] & 0x07u;\n'
+        '\t\tif (pdt[5] == 0x01) { f01_q = pdt[0]; f01_c = pdt[2]; f01_d = pdt[3]; }\n'
+        '\t\tif (pdt[5] == 0x12) {\n'
+        '\t\t\tf12_q = pdt[0]; f12_c = pdt[2]; f12_d = pdt[3];\n'
+        '\t\t\tif (irq_bit < 8u && nsrc) {\n'
+        '\t\t\t\tf12_irq = (uint8_t)(((1u << nsrc) - 1u) << irq_bit);\n'
+        '\t\t\t}\n'
+        '\t\t}\n'
+        '\t\tirq_bit += nsrc;\n'
+        '\t}\n'
+        '\tif (!f01_d || !f12_d || !f12_q) {\n'
+        '\t\tprintf("SWEET TOUCH: 0x20 missing F01/F12 (f01=%#x f12=%#x)\\n", f01_d, f12_d);\n'
+        '\t\treturn false;\n'
+        '\t}\n'
+        '\tuint8_t pid[11] = {0}, ctrl0 = 0;\n'
+        '\tif (f01_q) {\n'
+        '\t\t(void)touch_read(0x20, (uint16_t)(f01_q + 11u), false, pid, 10);\n'
+        '\t}\n'
+        '\tif (f01_c && touch_read(0x20, f01_c, false, &ctrl0, 1) == 0 && (ctrl0 & 0x03u)) {\n'
+        '\t\t(void)touch_write1(0x20, f01_c, (uint8_t)((ctrl0 & ~0x07u) | 0x80u));\n'
+        '\t}\n'
+        '\tuint8_t d1_off = 0, d1_n = TOUCH_MAX;\n'
+        '\tuint8_t sz_pres = 0, pres[16] = {0}, sbuf[64] = {0};\n'
+        '\tif (touch_read(0x20, (uint16_t)(f12_q + 6u), false, &sz_pres, 1) == 0 &&\n'
+        '\t    sz_pres >= 2u && sz_pres <= sizeof(pres) &&\n'
+        '\t    touch_read(0x20, (uint16_t)(f12_q + 7u), false, pres, sz_pres) == 0) {\n'
+        '\t\tunsigned p_off = (pres[0] == 0 && sz_pres >= 3u) ? 3u : 1u;\n'
+        '\t\tunsigned s_sz = (pres[0] == 0 && sz_pres >= 3u) ? ((unsigned)pres[1] | ((unsigned)pres[2] << 8)) : pres[0];\n'
+        '\t\tuint8_t pbyte = p_off < sz_pres ? pres[p_off] : 0;\n'
+        '\t\tif (pbyte & 0x01u) d1_off = 1u;\n'
+        '\t\tif ((pbyte & 0x02u) && s_sz > 0 && s_sz <= sizeof(sbuf) &&\n'
+        '\t\t    touch_read(0x20, (uint16_t)(f12_q + 8u), false, sbuf, s_sz) == 0) {\n'
+        '\t\t\tunsigned pos = 0;\n'
+        '\t\t\tif ((pbyte & 0x01u) && pos < s_sz) {\n'
+        '\t\t\t\tpos++;\n'
+        '\t\t\t\twhile (pos < s_sz && (sbuf[pos] & 0x80u)) pos++;\n'
+        '\t\t\t\tif (pos < s_sz) pos++;\n'
+        '\t\t\t}\n'
+        '\t\t\tif (pos < s_sz && sbuf[pos] >= 8u && sbuf[pos] <= 80u) {\n'
+        '\t\t\t\td1_n = (uint8_t)(sbuf[pos] / 8u);\n'
+        '\t\t\t}\n'
+        '\t\t}\n'
+        '\t}\n'
+        '\tif (d1_n > TOUCH_MAX) d1_n = TOUCH_MAX;\n'
+        '\tst.syn_f01_data = f01_d;\n'
+        '\tst.syn_f12_data = f12_d;\n'
+        '\tst.syn_f12_d1_off = d1_off;\n'
+        '\tst.syn_f12_n = d1_n;\n'
+        '\tst.syn_f12_irq_mask = f12_irq ? f12_irq : 0x04u;\n'
+        '\tst.syn_max_x = 1080;\n'
+        '\tst.syn_max_y = 2400;\n'
+        '\t(void)f12_c;\n'
+        '\tprintf("SWEET TOUCH: S3706 pid=%s f01=%#x f12=%#x d1_off=%u n=%u irq_mask=%#x\\n",\n'
+        '\t    (const char *)pid, f01_d, f12_d, d1_off, d1_n, st.syn_f12_irq_mask);\n'
+        '\treturn true;\n'
+        '}\n\n'
+        'static int\ntouch_synaptics(void)\n{\n'
+        '\tuint8_t ist[2] = {0}, buf[TOUCH_MAX * 8u];\n'
+        '\tint x[TOUCH_MAX] = {0}, y[TOUCH_MAX] = {0};\n'
+        '\tuint32_t mask = 0;\n'
+        '\tint err = touch_read(0x20, st.syn_f01_data, false, ist, 2);\n'
+        '\tif (err) return err;\n'
+        '\tif (!st.active && !(ist[1] & st.syn_f12_irq_mask)) {\n'
+        '\t\treturn 0;\n'
+        '\t}\n'
+        '\tunsigned n = st.syn_f12_n ? st.syn_f12_n : TOUCH_MAX;\n'
+        '\terr = touch_read(0x20, (uint16_t)(st.syn_f12_data + st.syn_f12_d1_off), false, buf, n * 8u);\n'
+        '\tif (err) return err;\n'
+        '\tfor (unsigned id = 0; id < n; ++id) {\n'
+        '\t\tconst uint8_t *p = buf + id * 8u;\n'
+        '\t\tif (p[0] == 0) continue;\n'
+        '\t\tunsigned px = (unsigned)p[1] | ((unsigned)p[2] << 8);\n'
+        '\t\tunsigned py = (unsigned)p[3] | ((unsigned)p[4] << 8);\n'
+        '\t\tif (px > 1079) px = (px * 1079u) / (st.syn_max_x ? st.syn_max_x : 1080u);\n'
+        '\t\tif (py > 2399) py = (py * 2399u) / (st.syn_max_y ? st.syn_max_y : 2400u);\n'
+        '\t\tif (px > 1079 || py > 2399) continue;\n'
+        '\t\tmask |= 1u << id;\n'
+        '\t\tx[id] = (int)px;\n'
+        '\t\ty[id] = (int)py;\n'
+        '\t}\n'
+        '\ttouch_report(mask, x, y);\n'
+        '\treturn 0;\n'
+        '}\n\n'
+        'static bool\ntouch_se_init(void)',
+        'sweet_touch.c add Synaptics S3706 RMI4 probe and reader',
+    )
+    replace_exact(
+        sweet_touch,
+        '\tunsigned delay_s = 45;\n'
+        '\t(void)arg;\n'
+        '\t(void)result;\n'
+        '\t/*\n'
+        '\t * Start late (boot-arg sweettouchdelay, seconds): if the bus access\n'
+        '\t * below hangs the SoC, the persistent log and the GUI got there first.\n'
+        '\t */\n'
+        '\t(void)PE_parse_boot_argn("sweettouchdelay", &delay_s, sizeof(delay_s));\n'
+        '\tprintf("SWEET TOUCH: starting in %u s\\n", delay_s);\n'
+        '\ttouch_wait(delay_s * 1000u);\n'
+        '\tprintf("SWEET TOUCH: mapping GCC/TLMM/SE7\\n");\n'
+        '\tst.gcc = ml_io_map(TOUCH_GCC_PA, 0x60000);\n'
+        '\tst.gpio = ml_io_map(TOUCH_NORTH_PA, 0x5b000);\n'
+        '\tst.se = ml_io_map(TOUCH_SE_PA, 0x4000);\n'
+        '\tif (!st.gcc || !st.gpio || !st.se) {\n'
+        '\t\tprintf("SWEET TOUCH: MMIO mapping failed\\n");\n'
+        '\t\tgoto out;\n'
+        '\t}\n'
+        '\tif (!touch_clocks() || !touch_se_init()) {\n'
+        '\t\tgoto out;\n'
+        '\t}\n'
+        '\tprintf("SWEET TOUCH: TLMM reset=%#x irq=%#x vdd90=%#x; voting L11C through RPMh\\n",\n'
+        '\t    touch_rd(st.gpio, TOUCH_GPIO_IO(8)), touch_rd(st.gpio, TOUCH_GPIO_IO(9)),\n'
+        '\t    touch_rd(st.gpio, TOUCH_GPIO_IO(90)));\n'
+        '\t/* Keep the IC in reset while its rails settle; IRQ stays an input. */\n'
+        '\ttouch_gpio(9, 0, 3, 3, false, false); /* IRQ input, 8 mA, pull-up */\n'
+        '\ttouch_gpio(8, 0, 3, 3, true, false);\n'
+        '\tint power_error = sweet_rpmh_vreg_enable("ldoc11", 3200);\n'
+        '\tif (power_error) {\n'
+        '\t\tprintf("SWEET TOUCH: L11C RPMh enable failed %d; probes skipped\\n", power_error);\n'
+        '\t\tgoto out;\n'
+        '\t}\n'
+        '\ttouch_gpio(90, 0, 0, 0, true, true); /* board digital power enable */\n'
+        '\ttouch_wait(10); /* conservative rail settling; not a DT timing value */\n'
+        '\ttouch_gpio(6, 1, 0, 0, false, false); /* qup11 SDA/SCL, 2 mA */\n'
+        '\ttouch_gpio(7, 1, 0, 0, false, false);\n'
+        '\t/* Vendor GT9896 dev_confirm: reset low 2 ms, then high. */\n'
+        '\ttouch_gpio(8, 0, 3, 3, true, false);\n'
+        '\ttouch_wait(2);\n'
+        '\ttouch_gpio(8, 0, 3, 3, true, true);\n'
+        '\ttouch_wait(300); /* exceeds vendor 5 ms test + 95 ms post-test wait */\n'
+        '\tuint8_t gid[32], legacy[32], fid1 = 0, fid2 = 0;\n'
+        '\tst.probing = true;\n'
+        '\tint ge = touch_probe_info(GOODIX_PID_REG, gid);\n'
+        '\tprintf("SWEET TOUCH: probe 0x5d err=%d pid=%02x%02x%02x%02x fw=%02x.%02x.%02x.%02x irq=%#x\\n",\n'
+        '\t    ge, gid[0], gid[1], gid[2], gid[3], gid[8], gid[9], gid[10], gid[11], st.irq_status);\n'
+        '\t(void)touch_probe_info(0x8240, legacy);\n'
+        '\tint fe1 = touch_read(0x38, 0xa3, false, &fid1, 1);\n'
+        '\tint fe2 = touch_read(0x38, 0x9f, false, &fid2, 1);\n'
+        '\tprintf("SWEET TOUCH: probe 0x38 err=%d/%d chip-id=%02x:%02x irq=%#x\\n",\n'
+        '\t    fe1, fe2, fid1, fid2, st.irq_status);\n'
+        '\tst.probing = false;\n'
+        '\tbool goodix = !ge && gid[0] == \'9\' && gid[1] == \'8\' && gid[2] == \'9\' && gid[3] == \'6\';\n'
+        '\tbool fts = !fe1 && !fe2 && fid1 == 0x54 && fid2 == 0x52;\n'
+        '\tif (st.dead || goodix == fts) {\n'
+        '\t\tprintf("SWEET TOUCH: no unique supported IC (goodix=%d fts=%d dead=%d); stopping\\n",\n'
+        '\t\t    goodix, fts, st.dead);\n'
+        '\t\tgoto out;\n'
+        '\t}\n'
+        '\tst.kind = goodix ? TOUCH_GOODIX : TOUCH_FTS;\n'
+        '\tprintf("SWEET TOUCH: selected %s, 1080x2400, poll=10ms irq-hint=%d\\n",\n'
+        '\t    goodix ? "GT9896 Yellowstone" : "Focaltech 54:52", st.irq_hint);\n'
+        '\tunsigned errors = 0, ticks = 0;\n'
+        '\twhile (!st.dead) {\n'
+        '\t\t/* Optional IRQ hint still reads every 100ms, and always while down. */\n'
+        '\t\tif (!st.irq_hint || st.active || !(touch_rd(st.gpio, TOUCH_GPIO_IO(9)) & 1u) ||\n'
+        '\t\t    (++ticks % 10u) == 0) {\n'
+        '\t\t\tint err = st.kind == TOUCH_GOODIX ? touch_goodix() : touch_focaltech();',
+        '\tunsigned delay_s = 15;\n'
+        '\t(void)arg;\n'
+        '\t(void)result;\n'
+        '\t(void)PE_parse_boot_argn("sweettouchdelay", &delay_s, sizeof(delay_s));\n'
+        '\tprintf("SWEET TOUCH: starting in %u s (PCLM10 SE17 + S3706)\\n", delay_s);\n'
+        '\ttouch_wait(delay_s * 1000u);\n'
+        '\tprintf("SWEET TOUCH: mapping GCC/TLMM_SOUTH/SE17\\n");\n'
+        '\tst.gcc = ml_io_map(TOUCH_GCC_PA, 0x60000);\n'
+        '\tst.gpio = ml_io_map(TOUCH_SOUTH_PA, 0x80000);\n'
+        '\tst.se = ml_io_map(TOUCH_SE_PA, 0x4000);\n'
+        '\tif (!st.gcc || !st.gpio || !st.se) {\n'
+        '\t\tprintf("SWEET TOUCH: MMIO mapping failed\\n");\n'
+        '\t\tgoto out;\n'
+        '\t}\n'
+        '\tif (!touch_clocks() || !touch_se_init()) {\n'
+        '\t\tgoto out;\n'
+        '\t}\n'
+        '\tprintf("SWEET TOUCH: TLMM reset54=%#x irq122=%#x; voting ldoa17 through RPMh\\n",\n'
+        '\t    touch_rd(st.gpio, TOUCH_GPIO_IO(54)), touch_rd(st.gpio, TOUCH_GPIO_IO(122)));\n'
+        '\ttouch_gpio(122, 0, 3, 3, false, false); /* IRQ input, 8 mA, pull-up */\n'
+        '\ttouch_gpio(54, 0, 3, 3, true, false);\n'
+        '\tint power_error = sweet_rpmh_vreg_enable("ldoa17", 3000);\n'
+        '\tif (power_error) {\n'
+        '\t\tprintf("SWEET TOUCH: ldoa17 RPMh rc=%d (continuing with ABL rail)\\n", power_error);\n'
+        '\t}\n'
+        '\ttouch_wait(10);\n'
+        '\ttouch_gpio(55, 1, 0, 0, false, false); /* qup17 SDA/SCL, 2 mA */\n'
+        '\ttouch_gpio(56, 1, 0, 0, false, false);\n'
+        '\ttouch_gpio(54, 0, 3, 3, true, false);\n'
+        '\ttouch_wait(2);\n'
+        '\ttouch_gpio(54, 0, 3, 3, true, true);\n'
+        '\ttouch_wait(150);\n'
+        '\tst.probing = true;\n'
+        '\tbool syn = touch_synaptics_probe();\n'
+        '\tbool goodix = false, fts = false;\n'
+        '\tif (!syn) {\n'
+        '\t\tuint8_t gid[32] = {0}, fid1 = 0, fid2 = 0;\n'
+        '\t\tint ge = touch_probe_info(GOODIX_PID_REG, gid);\n'
+        '\t\tint fe1 = touch_read(0x38, 0xa3, false, &fid1, 1);\n'
+        '\t\tint fe2 = touch_read(0x38, 0x9f, false, &fid2, 1);\n'
+        '\t\tgoodix = !ge && gid[0] == \'9\' && gid[1] == \'8\' && gid[2] == \'9\' && gid[3] == \'6\';\n'
+        '\t\tfts = !fe1 && !fe2 && fid1 == 0x54 && fid2 == 0x52;\n'
+        '\t}\n'
+        '\tst.probing = false;\n'
+        '\tif (st.dead || (!syn && goodix == fts)) {\n'
+        '\t\tprintf("SWEET TOUCH: no supported IC (syn=%d goodix=%d fts=%d dead=%d irq=%#x); stopping\\n",\n'
+        '\t\t    syn, goodix, fts, st.dead, st.irq_status);\n'
+        '\t\tgoto out;\n'
+        '\t}\n'
+        '\tst.kind = syn ? TOUCH_SYNAPTICS : (goodix ? TOUCH_GOODIX : TOUCH_FTS);\n'
+        '\tprintf("SWEET TOUCH: selected %s, 1080x2400, poll=10ms irq-hint=%d\\n",\n'
+        '\t    syn ? "Synaptics S3706" : (goodix ? "GT9896" : "Focaltech"), st.irq_hint);\n'
+        '\tunsigned errors = 0, ticks = 0;\n'
+        '\twhile (!st.dead) {\n'
+        '\t\tif (!st.irq_hint || st.active || !(touch_rd(st.gpio, TOUCH_GPIO_IO(122)) & 1u) ||\n'
+        '\t\t    (++ticks % 10u) == 0) {\n'
+        '\t\t\tint err = st.kind == TOUCH_SYNAPTICS ? touch_synaptics() : (st.kind == TOUCH_GOODIX ? touch_goodix() : touch_focaltech());',
+        'sweet_touch.c wire PCLM10 TLMM SOUTH/SE17/S3706 thread',
     )
 
     # 6. Start USB ECM + watchdog (when not using QUD) and run optional UFS GPT dump/split before md0
@@ -1356,6 +1685,11 @@ qcom_usb_worker_wait(void)
 static void
 qcom_usb_reboot_worker(void *argument __unused, wait_result_t result __unused)
 {
+\tprocessor_t processor = cpu_to_processor(master_cpu);
+\tif (processor != PROCESSOR_NULL) {
+\t\tthread_bind(processor);
+\t\tthread_block(THREAD_CONTINUE_NULL);
+\t}
 \tif (!qcom_usb_debug_control_arm_reboot()) {
 \t\t__atomic_store_n(&qcom_usb_reboot_state, 4u, __ATOMIC_RELEASE);
 \t\tqcom_usb_debug_control_reboot_failed(-4);
