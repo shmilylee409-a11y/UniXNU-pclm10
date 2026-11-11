@@ -166,9 +166,9 @@ jobs:
       - name: collect kernel
         run: |
           mkdir -p out-xnu
-          cp -R dxb/fakeroot/System/Library/Kernels/. out-xnu/
+          cp "dxb/fakeroot/System/Library/Kernels/kernel.development.sweet" out-xnu/
           ls -lh out-xnu/
-          (cd out-xnu && shasum -a 256 kernel.* > SHA256SUMS)
+          (cd out-xnu && shasum -a 256 kernel.development.sweet > SHA256SUMS)
 
       - name: upload sweet-xnu-pclm10
         uses: actions/upload-artifact@v4
