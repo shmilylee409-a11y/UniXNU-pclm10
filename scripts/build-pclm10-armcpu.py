@@ -21,7 +21,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-TIMER_HELPER = r'''static uint32_t gTimerIntid = 19;
+TIMER_HELPER = r'''extern "C" {
+volatile uint32_t armcpu_gic_stage = 0;
+volatile uint32_t armcpu_pclm10_status = 0;
+void pclm10_wake_usb_worker (void) __attribute__((weak));
+}
+
+static uint32_t gTimerIntid = 19;
 static uint32_t kSgiPpiEnable = 0xffffU | (1U << 19);
 
 static bool pclm10TimerIntid(bool present, const void *data, unsigned size, uint32_t *out)
@@ -36,6 +42,86 @@ static bool pclm10TimerIntid(bool present, const void *data, unsigned size, uint
   return true;
 }
 '''
+
+PREPARE_GIC_REPLACEMENT = r'''bool ArmCpu::prepareGic (void)
+{
+  armcpu_gic_stage = 1;
+  if (!mapGic ()) {
+    __atomic_store_n (&armcpu_pclm10_status, 2U, __ATOMIC_RELEASE);
+    IOLog ("PCLM10 ARMCPU FAIL: mapGic failed stage=%u\n", armcpu_gic_stage);
+    if (pclm10_wake_usb_worker) { pclm10_wake_usb_worker (); }
+    return false;
+  }
+  armcpu_gic_stage = 2;
+  if (!initDistributor ()) {
+    __atomic_store_n (&armcpu_pclm10_status, 2U, __ATOMIC_RELEASE);
+    IOLog ("PCLM10 ARMCPU FAIL: initDistributor failed stage=%u ctl=0x%x\n",
+           armcpu_gic_stage, read32 (dist, 0));
+    if (pclm10_wake_usb_worker) { pclm10_wake_usb_worker (); }
+    return false;
+  }
+  armcpu_gic_stage = 3;
+  if (!wakeRedistributor (true)) {
+    __atomic_store_n (&armcpu_pclm10_status, 2U, __ATOMIC_RELEASE);
+    IOLog ("PCLM10 ARMCPU FAIL: wakeRedistributor failed stage=%u aff=0x%llx redist=0x%llx typer=0x%x\n",
+           armcpu_gic_stage,
+           static_cast<unsigned long long> (affinity),
+           static_cast<unsigned long long> (redist),
+           armcpu_gic_typer_probe[1]);
+    if (pclm10_wake_usb_worker) { pclm10_wake_usb_worker (); }
+    return false;
+  }
+  armcpu_gic_stage = 4;
+  gGicShared = 1;
+  return true;
+}'''
+
+START_VERIFY_SUFFIX = r'''  __atomic_store_n (&gBootRegistered, 1U, __ATOMIC_RELEASE);
+  drainPending ();
+  if (!skipGic) {
+    uint64_t freq = 0, start_t = 0, now_t = 0;
+    __asm__ volatile ("mrs %0, cntfrq_el0" : "=r" (freq));
+    __asm__ volatile ("isb\n\tmrs %0, cntvct_el0" : "=r" (start_t));
+    if (freq == 0) { freq = 19200000ULL; }
+    uint64_t limit = start_t + (freq / 5ULL);
+    while (__atomic_load_n (&armcpu_timer_interrupts, __ATOMIC_ACQUIRE) == 0) {
+      __asm__ volatile ("isb\n\tmrs %0, cntvct_el0" : "=r" (now_t));
+      if (now_t >= limit) { break; }
+    }
+    uint64_t tirq = __atomic_load_n (&armcpu_timer_interrupts, __ATOMIC_ACQUIRE);
+    if (tirq == 0) {
+      uint64_t daif = 0, ctl = 0, cval = 0, cnt = 0, hppir = 0, rpr = 0;
+      __asm__ volatile ("mrs %0, daif" : "=r" (daif));
+      __asm__ volatile ("mrs %0, cntv_ctl_el0" : "=r" (ctl));
+      __asm__ volatile ("mrs %0, cntv_cval_el0" : "=r" (cval));
+      __asm__ volatile ("mrs %0, cntvct_el0" : "=r" (cnt));
+      __asm__ volatile ("mrs %0, icc_hppir1_el1" : "=r" (hppir));
+      __asm__ volatile ("mrs %0, icc_rpr_el1" : "=r" (rpr));
+      uint32_t isp = redist ? read32 (redist + 0x10000, 0x200) : 0;
+      uint32_t iact = redist ? read32 (redist + 0x10000, 0x280) : 0;
+      IOLog ("PCLM10 ARMCPU TIMER TIMEOUT: intid=%u daif=0x%llx ctl=0x%llx cval=0x%llx cnt=0x%llx hppir=0x%llx rpr=0x%llx isp=0x%x iact=0x%x boot=%x/%x/%x/%x/%x/%x/%x/%x\n",
+             gTimerIntid,
+             static_cast<unsigned long long> (daif),
+             static_cast<unsigned long long> (ctl),
+             static_cast<unsigned long long> (cval),
+             static_cast<unsigned long long> (cnt),
+             static_cast<unsigned long long> (hppir),
+             static_cast<unsigned long long> (rpr),
+             isp, iact,
+             armcpu_gic_boot[0], armcpu_gic_boot[1], armcpu_gic_boot[2], armcpu_gic_boot[3],
+             armcpu_gic_boot[4], armcpu_gic_boot[5], armcpu_gic_boot[6], armcpu_gic_boot[7]);
+      __atomic_store_n (&armcpu_pclm10_status, 2U, __ATOMIC_RELEASE);
+    } else {
+      IOLog ("PCLM10 ARMCPU OK: intid=%u tirq=%llu boot=%x/%x/%x/%x/%x/%x\n",
+             gTimerIntid,
+             static_cast<unsigned long long> (tirq),
+             armcpu_gic_boot[0], armcpu_gic_boot[1], armcpu_gic_boot[2],
+             armcpu_gic_boot[5], armcpu_gic_boot[6], armcpu_gic_boot[7]);
+      __atomic_store_n (&armcpu_pclm10_status, 1U, __ATOMIC_RELEASE);
+    }
+    if (pclm10_wake_usb_worker) { pclm10_wake_usb_worker (); }
+  }
+  return true;'''
 
 TIMER_PROPERTY = r'''  OSObject *timerObject = gic->getProperty ("virtual-timer-intid");
   OSData *timerData = OSDynamicCast (OSData, timerObject);
@@ -74,6 +160,16 @@ def patch_timer_source(text: str) -> str:
         ('  armcpu_gic_stride = static_cast<uint32_t> (gRedistStride);\n',
          TIMER_PROPERTY + '  armcpu_gic_stride = static_cast<uint32_t> (gRedistStride);\n'),
         ('    if ((id & 0xffffff) == 27) {\n', '    if ((id & 0xffffff) == gTimerIntid) {\n'),
+        ('bool ArmCpu::prepareGic (void)\n{\n  if (!mapGic () || !initDistributor () || !wakeRedistributor (true)) { return false; }\n  gGicShared = 1;\n  return true;\n}',
+         PREPARE_GIC_REPLACEMENT),
+        ('  if (!valid || (regions[1] < 0x10000) || (regions[3] < 0x20000)) {\n    return false;\n  }',
+         '  if (!valid) {\n    IOLog ("PCLM10 ARMCPU FAIL: mapGic dt invalid\\n");\n    return false;\n  }\n  if ((regions[1] < 0x10000) || (regions[3] < 0x20000)) {\n    IOLog ("PCLM10 ARMCPU FAIL: mapGic regions r1=0x%llx r3=0x%llx\\n", static_cast<unsigned long long> (regions[1]), static_cast<unsigned long long> (regions[3]));\n    return false;\n  }'),
+        ('  if (((read32 (dist, 0xffe8) >> 4) & 15) != 3) {\n    return false;\n  }',
+         '  if (((read32 (dist, 0xffe8) >> 4) & 15) != 3) {\n    IOLog ("PCLM10 ARMCPU FAIL: mapGic pidr2=0x%x\\n", read32 (dist, 0xffe8));\n    return false;\n  }'),
+        ('  __atomic_store_n (&gBootRegistered, 1U, __ATOMIC_RELEASE);\n  drainPending ();\n  return true;',
+         START_VERIFY_SUFFIX),
+        ('    if ((!skipGic && !prepareGic ()) || !IOCPU::start (provider)) { return false; }',
+         '    if (!skipGic && !prepareGic ()) { return false; }\n    if (!IOCPU::start (provider)) {\n      __atomic_store_n (&armcpu_pclm10_status, 2U, __ATOMIC_RELEASE);\n      IOLog ("PCLM10 ARMCPU FAIL: IOCPU::start failed\\n");\n      if (pclm10_wake_usb_worker) { pclm10_wake_usb_worker (); }\n      return false;\n    }'),
     ):
         if text.count(old) != 1:
             raise SystemExit(f"ArmCpu timer source anchor mismatch: {old[:80]!r}")

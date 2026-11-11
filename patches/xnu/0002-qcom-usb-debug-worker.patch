@@ -14,7 +14,7 @@
  
  #if (DEVELOPMENT || DEBUG)
  #include <kern/debug.h>
-@@ -1287,13 +1294,193 @@ bsdinit_task
+@@ -1287,13 +1294,225 @@ bsdinit_task
  
  	load_init_program(p);
  	lock_trace = 1;
@@ -25,9 +25,11 @@
 +extern int boot_reset_bootloader(char *, unsigned);
 +extern void pclm10_delay_ms(uint32_t ms);
 +extern volatile uint32_t armcpu_gic_ready __attribute__((weak));
++extern volatile uint32_t armcpu_pclm10_status __attribute__((weak));
 +extern volatile uint64_t armcpu_timer_interrupts __attribute__((weak));
 +extern volatile uint64_t armcpu_ipi_interrupts __attribute__((weak));
 +extern volatile uint32_t armcpu_gic_boot[8] __attribute__((weak));
++void pclm10_wake_usb_worker(void);
 +/* Exactly the Mach-private prototypes the worker needs, spelled here because
 + * this translation unit does not define MACH_KERNEL_PRIVATE (checked in
 + * bsd/DEVELOPMENT/bsd_init.o.json).  Using the real headers instead would
@@ -40,6 +42,28 @@
 + * States: 0 unstarted, 1 creating, 2 running, 3 start/bind failure, 4 stopped.
 + */
 +static unsigned int qcom_usb_worker_state;
++
++void
++pclm10_wake_usb_worker(void)
++{
++	(void)thread_wakeup((event_t)&qcom_usb_worker_state);
++}
++
++static void
++qcom_usb_worker_wait(void)
++{
++	uint64_t deadline;
++
++	/* Unlike delay_for_interval this never selects a CPU-latency spin path.
++	 * Yield on an interruptible/timed wait so ArmCpu::start() can schedule
++	 * on CPU 0; ArmCpu calls pclm10_wake_usb_worker() if GIC/timer fails.
++	 */
++	clock_interval_to_deadline(5, NSEC_PER_MSEC, &deadline);
++	if (assert_wait_deadline((event_t)&qcom_usb_worker_state,
++	    THREAD_UNINT, deadline) == THREAD_WAITING) {
++		thread_block(THREAD_CONTINUE_NULL);
++	}
++}
 +
 +/* Wait for queued USB traffic to drain and reset straight to fastboot on the
 + * current master-bound worker thread (avoiding unscheduled timer blocks). */
@@ -134,13 +158,17 @@
 +		if (control_active) {
 +			qcom_usb_start_reboot_once();
 +		}
-+		if (diag_ticks < 600u && (++diag_ticks == 200u || diag_ticks == 600u)) {
++		if (diag_ticks < 600u &&
++		    (++diag_ticks == 1u || diag_ticks == 50u ||
++		     diag_ticks == 200u || diag_ticks == 600u)) {
 +			const volatile uint32_t *gready = &armcpu_gic_ready;
++			const volatile uint32_t *gstatus = &armcpu_pclm10_status;
 +			const volatile uint64_t *tirq = &armcpu_timer_interrupts;
 +			const volatile uint64_t *iirq = &armcpu_ipi_interrupts;
 +			const volatile uint32_t *gboot = armcpu_gic_boot;
-+			printf("PCLM10 GIC: t=%u ready=%u tirq=%llu ipi=%llu boot=%x/%x/%x/%x/%x/%x\n",
++			printf("PCLM10 GIC: t=%u st=%u ready=%u tirq=%llu ipi=%llu boot=%x/%x/%x/%x/%x/%x\n",
 +			    diag_ticks,
++			    gstatus ? *gstatus : 0u,
 +			    gready ? *gready : 0u,
 +			    tirq ? *tirq : 0ULL,
 +			    iirq ? *iirq : 0ULL,
@@ -159,8 +187,12 @@
 +			printf("PCLM10 AUTORESET failed: %s\n", rbuf);
 +			break;
 +		}
-+		pclm10_delay_ms(5u);
-+		thread_block(THREAD_CONTINUE_NULL);
++		const volatile uint32_t *gstatus = &armcpu_pclm10_status;
++		if (gstatus && *gstatus == 2u) {
++			pclm10_delay_ms(5u);
++		} else {
++			qcom_usb_worker_wait();
++		}
 +	}
 +
 +stopped:
