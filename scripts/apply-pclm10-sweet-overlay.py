@@ -774,13 +774,181 @@ def apply_overlay(xnu: Path) -> None:
         encoding='utf-8',
     )
 
-    # 5. Adapt sweet_ufs.c: SM8150 SMMU stream 0x300 bypass + opt-in SM7150 keys/touch
+    # 5. Adapt sweet_ufs.c: SM8150 SMMU stream 0x300 bypass + opt-in SM7150 keys/touch + GPT dump/split helper
     sweet_ufs = xnu / 'bsd/dev/sweet_ufs.c'
     replace_exact(
         sweet_ufs,
         'static int\nufs_take_over_host(void)',
-        'extern void pclm10_smmu_bypass_stream(uint32_t stream);\n\nstatic int\nufs_take_over_host(void)',
-        'sweet_ufs.c SMMU declaration',
+        'extern void pclm10_smmu_bypass_stream(uint32_t stream);\n\n'
+        'static uint32_t\n'
+        'pclm10_crc32(const uint8_t *buf, size_t len)\n'
+        '{\n'
+        '\tuint32_t crc = 0xffffffffu;\n'
+        '\tfor (size_t i = 0; i < len; i++) {\n'
+        '\t\tcrc ^= buf[i];\n'
+        '\t\tfor (int b = 0; b < 8; b++) {\n'
+        '\t\t\tcrc = (crc >> 1) ^ (0xedb88320u & (uint32_t)(-(int32_t)(crc & 1u)));\n'
+        '\t\t}\n'
+        '\t}\n'
+        '\treturn ~crc;\n'
+        '}\n\n'
+        'static int\n'
+        'pclm10_ufs_write_raw_lba(uint64_t lba, uint32_t count)\n'
+        '{\n'
+        '\tif (count == 0 || count > BOUNCE_SIZE / UFS_BLOCK || lba + count - 1 > UINT32_MAX) {\n'
+        '\t\treturn EINVAL;\n'
+        '\t}\n'
+        '\tuint8_t cdb[10] = {\n'
+        '\t\t0x2a, 0,\n'
+        '\t\t(uint8_t)(lba >> 24), (uint8_t)(lba >> 16), (uint8_t)(lba >> 8), (uint8_t)lba,\n'
+        '\t\t0, (uint8_t)(count >> 8), (uint8_t)count, 0\n'
+        '\t};\n'
+        '\treturn ufs_scsi(cdb, sizeof(cdb), count * UFS_BLOCK, true);\n'
+        '}\n\n'
+        'static void\n'
+        'pclm10_ufs_gpt_inspect_or_split(uint8_t *hdr_buf, uint64_t entry_lba, uint32_t nent, uint32_t esz)\n'
+        '{\n'
+        '\tuint8_t *b = (uint8_t *)(su.dma + DMA_BOUNCE);\n'
+        '\tuint32_t ufsdump = 0, split_mib = 0, ufsrw = 0;\n'
+        '\t(void)PE_parse_boot_argn("ufsdump", &ufsdump, sizeof(ufsdump));\n'
+        '\t(void)PE_parse_boot_argn("pclm10-split-ios", &split_mib, sizeof(split_mib));\n'
+        '\t(void)PE_parse_boot_argn("ufsrw", &ufsrw, sizeof(ufsrw));\n'
+        '\tif (!ufsdump && !split_mib) {\n'
+        '\t\treturn;\n'
+        '\t}\n'
+        '\tuint64_t alt_lba = 0, first_usable = 0, last_usable = 0;\n'
+        '\tuint32_t hdr_sz = 0, orig_entries_crc = 0;\n'
+        '\tmemcpy(&hdr_sz, hdr_buf + 12, 4);\n'
+        '\tmemcpy(&alt_lba, hdr_buf + 32, 8);\n'
+        '\tmemcpy(&first_usable, hdr_buf + 40, 8);\n'
+        '\tmemcpy(&last_usable, hdr_buf + 48, 8);\n'
+        '\tmemcpy(&orig_entries_crc, hdr_buf + 88, 4);\n'
+        '\tuint32_t calc_crc = pclm10_crc32(b, (size_t)nent * (size_t)esz);\n'
+        '\tprintf("PCLM10 GPT: hdr_sz=%u nent=%u esz=%u entry_lba=0x%llx first=0x%llx last=0x%llx alt=0x%llx crc_ok=%d\\n",\n'
+        '\t    hdr_sz, nent, esz, entry_lba, first_usable, last_usable, alt_lba, calc_crc == orig_entries_crc);\n'
+        '\tint ud_idx = -1, ios_idx = -1, free_idx = -1;\n'
+        '\tuint64_t ud_first = 0, ud_last = 0, max_end = 0;\n'
+        '\tfor (uint32_t i = 0; i < nent; i++) {\n'
+        '\t\tconst uint8_t *e = b + (size_t)i * (size_t)esz;\n'
+        '\t\tint nonzero = 0;\n'
+        '\t\tfor (int k = 0; k < 16; k++) {\n'
+        '\t\t\tif (e[k] != 0) { nonzero = 1; break; }\n'
+        '\t\t}\n'
+        '\t\tif (!nonzero) {\n'
+        '\t\t\tif (free_idx < 0) { free_idx = (int)i; }\n'
+        '\t\t\tcontinue;\n'
+        '\t\t}\n'
+        '\t\tchar pname[37];\n'
+        '\t\tunsigned c;\n'
+        '\t\tfor (c = 0; c < 36; c++) {\n'
+        '\t\t\tuint16_t ch = (uint16_t)(e[56 + 2 * c] | ((uint16_t)e[57 + 2 * c] << 8));\n'
+        '\t\t\tif (ch == 0 || ch > 0x7f) { break; }\n'
+        '\t\t\tpname[c] = (char)ch;\n'
+        '\t\t}\n'
+        '\t\tpname[c] = 0;\n'
+        '\t\tuint64_t f = 0, l = 0;\n'
+        '\t\tmemcpy(&f, e + 32, 8);\n'
+        '\t\tmemcpy(&l, e + 40, 8);\n'
+        '\t\tif (l > max_end) { max_end = l; }\n'
+        '\t\tif (strcmp(pname, "userdata") == 0) { ud_idx = (int)i; ud_first = f; ud_last = l; }\n'
+        '\t\tif (strcmp(pname, "ios") == 0) { ios_idx = (int)i; }\n'
+        '\t\tif (ufsdump) {\n'
+        '\t\t\tprintf("PCLM10 GPT[%2u]: %-20s 0x%08llx..0x%08llx (%llu MiB)\\n",\n'
+        '\t\t\t    i, pname, f, l, (l >= f ? (l - f + 1) * UFS_BLOCK : 0) >> 20);\n'
+        '\t\t}\n'
+        '\t}\n'
+        '\tif (!split_mib || !ufsrw) { return; }\n'
+        '\tif (hdr_sz < 92 || hdr_sz > UFS_BLOCK || calc_crc != orig_entries_crc ||\n'
+        '\t    entry_lba != 2 || alt_lba <= last_usable || ud_idx < 0 || free_idx < 0 ||\n'
+        '\t    ios_idx >= 0 || ud_last < max_end) {\n'
+        '\t\tprintf("PCLM10 GPT SPLIT REFUSED: ud=%d free=%d ios=%d max_end=0x%llx ud_last=0x%llx\\n",\n'
+        '\t\t    ud_idx, free_idx, ios_idx, max_end, ud_last);\n'
+        '\t\treturn;\n'
+        '\t}\n'
+        '\tuint64_t split_blocks = (uint64_t)split_mib * 256ULL;\n'
+        '\tuint64_t min_ud_blocks = 8192ULL * 256ULL;\n'
+        '\tif (ud_last <= ud_first || (ud_last - ud_first + 1) <= split_blocks + min_ud_blocks) {\n'
+        '\t\tprintf("PCLM10 GPT SPLIT REFUSED: userdata too small\\n");\n'
+        '\t\treturn;\n'
+        '\t}\n'
+        '\tuint64_t ios_first = (ud_last + 1ULL - split_blocks) & ~255ULL;\n'
+        '\tif (ios_first <= ud_first + min_ud_blocks || ios_first > ud_last) {\n'
+        '\t\tprintf("PCLM10 GPT SPLIT REFUSED: alignment invalid\\n");\n'
+        '\t\treturn;\n'
+        '\t}\n'
+        '\tuint64_t new_ud_last = ios_first - 1ULL;\n'
+        '\tuint8_t *ud_e = b + (size_t)ud_idx * (size_t)esz;\n'
+        '\tmemcpy(ud_e + 40, &new_ud_last, 8);\n'
+        '\tuint8_t *ios_e = b + (size_t)free_idx * (size_t)esz;\n'
+        '\tbzero(ios_e, esz);\n'
+        '\tstatic const uint8_t basic_type[16] = {\n'
+        '\t\t0xa2, 0xa0, 0xd0, 0xeb, 0xe5, 0xb9, 0x33, 0x44,\n'
+        '\t\t0x87, 0xc0, 0x68, 0xb6, 0xb7, 0x26, 0x99, 0xc7\n'
+        '\t};\n'
+        '\tstatic const uint8_t ios_uniq[16] = {\n'
+        '\t\t0x10, 0x50, 0x43, 0x4c, 0x4d, 0x10, 0x49, 0x4f,\n'
+        '\t\t0x53, 0x00, 0x20, 0x48, 0x33, 0x39, 0x32, 0x01\n'
+        '\t};\n'
+        '\tmemcpy(ios_e + 0, basic_type, 16);\n'
+        '\tmemcpy(ios_e + 16, ios_uniq, 16);\n'
+        '\tmemcpy(ios_e + 32, &ios_first, 8);\n'
+        '\tmemcpy(ios_e + 40, &ud_last, 8);\n'
+        '\tios_e[56] = \'i\'; ios_e[58] = \'o\'; ios_e[60] = \'s\';\n'
+        '\tuint32_t new_crc = pclm10_crc32(b, (size_t)nent * (size_t)esz);\n'
+        '\tuint32_t eblocks = (nent * esz + UFS_BLOCK - 1) / UFS_BLOCK;\n'
+        '\tint werr = pclm10_ufs_write_raw_lba(alt_lba - eblocks, eblocks);\n'
+        '\tif (!werr) { werr = pclm10_ufs_write_raw_lba(entry_lba, eblocks); }\n'
+        '\tstatic uint8_t pri_hdr[UFS_BLOCK], alt_hdr[UFS_BLOCK];\n'
+        '\tmemcpy(pri_hdr, hdr_buf, UFS_BLOCK);\n'
+        '\tmemcpy(pri_hdr + 88, &new_crc, 4);\n'
+        '\tbzero(pri_hdr + 16, 4);\n'
+        '\tuint32_t pri_hcrc = pclm10_crc32(pri_hdr, hdr_sz);\n'
+        '\tmemcpy(pri_hdr + 16, &pri_hcrc, 4);\n'
+        '\tmemcpy(alt_hdr, hdr_buf, UFS_BLOCK);\n'
+        '\tuint64_t one = 1ULL, alt_ent_lba = alt_lba - eblocks;\n'
+        '\tmemcpy(alt_hdr + 24, &alt_lba, 8);\n'
+        '\tmemcpy(alt_hdr + 32, &one, 8);\n'
+        '\tmemcpy(alt_hdr + 72, &alt_ent_lba, 8);\n'
+        '\tmemcpy(alt_hdr + 88, &new_crc, 4);\n'
+        '\tbzero(alt_hdr + 16, 4);\n'
+        '\tuint32_t alt_hcrc = pclm10_crc32(alt_hdr, hdr_sz);\n'
+        '\tmemcpy(alt_hdr + 16, &alt_hcrc, 4);\n'
+        '\tif (!werr) {\n'
+        '\t\tmemcpy(b, alt_hdr, UFS_BLOCK);\n'
+        '\t\twerr = pclm10_ufs_write_raw_lba(alt_lba, 1);\n'
+        '\t}\n'
+        '\tif (!werr) {\n'
+        '\t\tmemcpy(b, pri_hdr, UFS_BLOCK);\n'
+        '\t\twerr = pclm10_ufs_write_raw_lba(1, 1);\n'
+        '\t}\n'
+        '\tif (!werr) {\n'
+        '\t\tbzero(b, 64u * UFS_BLOCK);\n'
+        '\t\twerr = pclm10_ufs_write_raw_lba(ios_first, 64u);\n'
+        '\t}\n'
+        '\t(void)ufs_sync_cache();\n'
+        '\t/* Restore GPT entries in bounce buffer for subsequent partition lookup */\n'
+        '\t(void)ufs_read_blocks(entry_lba, eblocks);\n'
+        '\tprintf("PCLM10 GPT SPLIT: rc=%d userdata=0x%llx..0x%llx (%llu MiB) ios=0x%llx..0x%llx (%llu MiB)\\n",\n'
+        '\t    werr, ud_first, new_ud_last, ((new_ud_last - ud_first + 1) * UFS_BLOCK) >> 20,\n'
+        '\t    ios_first, ud_last, ((ud_last - ios_first + 1) * UFS_BLOCK) >> 20);\n'
+        '}\n\n'
+        'static int\nufs_take_over_host(void)',
+        'sweet_ufs.c SMMU declaration and GPT dump/split helpers',
+    )
+    replace_exact(
+        sweet_ufs,
+        '\tif (memcmp(b, "EFI PART", 8) != 0) {\n\t\tprintf("SWEET UFS: LUN %u has no GPT\\n", su.lun);\n\t\treturn ENXIO;\n\t}',
+        '\tif (memcmp(b, "EFI PART", 8) != 0) {\n\t\tprintf("SWEET UFS: LUN %u has no GPT\\n", su.lun);\n\t\treturn ENXIO;\n\t}\n'
+        '\tstatic uint8_t pclm10_gpt_hdr[UFS_BLOCK];\n'
+        '\tmemcpy(pclm10_gpt_hdr, b, UFS_BLOCK);',
+        'sweet_ufs.c save GPT header copy',
+    )
+    replace_exact(
+        sweet_ufs,
+        '\terror = ufs_read_blocks(entry_lba, (nent * esz + UFS_BLOCK - 1) / UFS_BLOCK);\n\tif (error) {\n\t\treturn error;\n\t}',
+        '\terror = ufs_read_blocks(entry_lba, (nent * esz + UFS_BLOCK - 1) / UFS_BLOCK);\n\tif (error) {\n\t\treturn error;\n\t}\n'
+        '\tpclm10_ufs_gpt_inspect_or_split(pclm10_gpt_hdr, entry_lba, nent, esz);',
+        'sweet_ufs.c invoke GPT inspect/split helper',
     )
     replace_exact(
         sweet_ufs,
@@ -795,13 +963,12 @@ def apply_overlay(xnu: Path) -> None:
         'sweet_ufs.c gate SM7150 keys/touch',
     )
 
-    # 6. Start USB ECM + watchdog early in IOFindBSDRoot (works for both rd=md0 and rd=ufsroot0)
-    #    Skipped when qcom-usb-debug=1 so QcomXnuUsbDebug owns DWC3 and pclm10-autoreset exclusively.
+    # 6. Start USB ECM + watchdog (when not using QUD) and run optional UFS GPT dump/split before md0
     replace_exact(
         xnu / 'iokit/bsddev/IOKitBSDInit.cpp',
         '\tif (strcmp(rdBootVar, "ufsroot0") == 0) {',
         '\t{\n'
-        '\t\tuint32_t qud_enabled = 0;\n'
+        '\t\tuint32_t qud_enabled = 0, ufsdump = 0, split_mib = 0;\n'
         '\t\tPE_parse_boot_argn("qcom-usb-debug", &qud_enabled, sizeof(qud_enabled));\n'
         '\t\tif (qud_enabled != 1) {\n'
         '\t\t\textern void pclm10_watchdog_start(void);\n'
@@ -809,9 +976,16 @@ def apply_overlay(xnu: Path) -> None:
         '\t\t\tpclm10_watchdog_start();\n'
         '\t\t\tsweet_usb_probe();\n'
         '\t\t}\n'
+        '\t\tPE_parse_boot_argn("ufsdump", &ufsdump, sizeof(ufsdump));\n'
+        '\t\tPE_parse_boot_argn("pclm10-split-ios", &split_mib, sizeof(split_mib));\n'
+        '\t\tif ((ufsdump || split_mib) && strcmp(rdBootVar, "ufsroot0") != 0) {\n'
+        '\t\t\textern int sweet_ufs_rootdev(dev_t *dev);\n'
+        '\t\t\tdev_t dummy_ufs = 0;\n'
+        '\t\t\t(void)sweet_ufs_rootdev(&dummy_ufs);\n'
+        '\t\t}\n'
         '\t}\n'
         '\tif (strcmp(rdBootVar, "ufsroot0") == 0) {',
-        'IOKitBSDInit start USB and watchdog',
+        'IOKitBSDInit start USB, watchdog, and optional UFS dump/split',
     )
 
     # 7. Match oppo,pclm10 in KernelConfigTables
