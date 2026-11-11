@@ -81,6 +81,7 @@ jobs:
 
       - name: prepare uefi-pclm10
         run: |
+          cp device/scripts/build-pclm10-armcpu.py UniXNU/scripts/
           cp device/scripts/build-pclm10-ufs-readonly.py UniXNU/scripts/
           cp device/scripts/build-pclm10-usb-debug.py UniXNU/scripts/
           mkdir -p UniXNU/.cache

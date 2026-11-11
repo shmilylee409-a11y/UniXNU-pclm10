@@ -112,11 +112,10 @@
     };
 
     soc {
-        // Identity mapping for the entire 64-bit SoC register space.
-        // Overrides the narrow 0x17000000..0x1f000000 ranges in sm8150.dtsi
-        // so that ufs (0x01d84000), ufs_smmu (0x15000000), gpu (0x02c00000),
-        // and board I2C controllers translate 1:1 into physical MMIO.
-        ranges;
+        // Explicit 24-byte 1:1 ranges window [0, 0x20000000) covering GCC (0x100000),
+        // QUPv3 I2C, UFS (0x01d84000), GPU (0x02c00000), UFS SMMU (0x15000000), and
+        // GICv3 intc (0x17a00000) while satisfying ArmCpu::mapGic() 24-byte ranges check.
+        ranges = <0x0 0x00000000 0x0 0x00000000 0x0 0x20000000>;
 
         framebuffer0: framebuffer@9d000000 {
             compatible = "simple-framebuffer";

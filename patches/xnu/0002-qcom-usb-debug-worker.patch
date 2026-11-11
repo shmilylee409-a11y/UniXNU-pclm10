@@ -14,7 +14,7 @@
  
  #if (DEVELOPMENT || DEBUG)
  #include <kern/debug.h>
-@@ -1287,13 +1294,170 @@ bsdinit_task
+@@ -1287,13 +1294,191 @@ bsdinit_task
  
  	load_init_program(p);
  	lock_trace = 1;
@@ -24,6 +24,10 @@
 +extern char pclm10_usb_persist_line[384];
 +extern int boot_reset_bootloader(char *, unsigned);
 +extern void pclm10_delay_ms(uint32_t ms);
++extern volatile uint32_t armcpu_gic_ready __attribute__((weak));
++extern volatile uint64_t armcpu_timer_interrupts __attribute__((weak));
++extern volatile uint64_t armcpu_ipi_interrupts __attribute__((weak));
++extern volatile uint32_t armcpu_gic_boot[8] __attribute__((weak));
 +/* Exactly the Mach-private prototypes the worker needs, spelled here because
 + * this translation unit does not define MACH_KERNEL_PRIVATE (checked in
 + * bsd/DEVELOPMENT/bsd_init.o.json).  Using the real headers instead would
@@ -116,6 +120,7 @@
 +		}
 +	}
 +	unsigned int idle_ticks = 0;
++	unsigned int diag_ticks = 0;
 +	for (;;) {
 +		/* The panic hook keeps its own separate bounded drain. */
 +		if (panic_active()) {
@@ -128,6 +133,22 @@
 +		qcom_usb_debug_poll();
 +		if (control_active) {
 +			qcom_usb_start_reboot_once();
++		}
++		if (diag_ticks < 600u && ++diag_ticks == 600u) {
++			const volatile uint32_t *gready = &armcpu_gic_ready;
++			const volatile uint64_t *tirq = &armcpu_timer_interrupts;
++			const volatile uint64_t *iirq = &armcpu_ipi_interrupts;
++			const volatile uint32_t *gboot = armcpu_gic_boot;
++			printf("PCLM10 GIC: ready=%u tirq=%llu ipi=%llu boot=%x/%x/%x/%x/%x/%x\n",
++			    gready ? *gready : 0u,
++			    tirq ? *tirq : 0ULL,
++			    iirq ? *iirq : 0ULL,
++			    gboot ? gboot[0] : 0u,
++			    gboot ? gboot[1] : 0u,
++			    gboot ? gboot[2] : 0u,
++			    gboot ? gboot[5] : 0u,
++			    gboot ? gboot[6] : 0u,
++			    gboot ? gboot[7] : 0u);
 +		}
 +		if (autoreset_sec > 0u && status.control_replies == 0 &&
 +		    ++idle_ticks >= autoreset_sec * 200u) {

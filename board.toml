@@ -37,7 +37,7 @@ archives = [
   "build-corecrypto-14.py",
   "build-corecrypto-14.py --namespace",
   "component:ArmDTPlatform",
-  "component:ArmCpu",
+  "build-pclm10-armcpu.py",
   "component:SoftwareAES",
   "build-software-aes-bindings.py",
   "build-mockfs-fixture.py",
