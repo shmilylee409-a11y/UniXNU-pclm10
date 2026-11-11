@@ -196,13 +196,15 @@ inputs = [
 ]
 configuration = [
     "SweetFramebuffer publishes AppleCLCD 1080x2400 stride 4320 at 0x9d000000 (presented as 1125x2436 BGRA8888) and registers qcom_usb_debug_register_framebuffer(&qud_fb) for live USB PNG capture.",
+    "AppleCLCD::present() bilinearly downscales the logical 1125x2436 frame to 1080x2400 via a cached horizontal LUT and L1 rowbuf[2048] + memcpy Write-Combine bursts (preventing WC bus stalls and 22/23px edge clipping, with sweetfb_crop=1 opt-in), composites multi-layer SrcOver alpha, clears uncovered background, and drains stores with dsb sy.",
     "SweetFramebuffer RequestPowerChange (selector 12) handles display on/off transitions from backboardd.",
 ]
 procedure = [
-    "Boot XNU with sweetfb_noconsole=1 sweetfb_hz=30 qcom-usb-debug=1 qcom-usb-ctl=1 and capture CRC-verified PNG frames via scripts/screenshot-xnu-usb.py after SpringBoard swap.",
+    "Boot XNU with sweetfb_noconsole=1 sweetfb_hz=15 qcom-usb-debug=1 qcom-usb-ctl=1 and capture CRC-verified PNG frames via scripts/screenshot-xnu-usb.py across Lock Screen, Home Screen, Settings, and App Library transitions.",
 ]
 findings = [
-    "Device-verified 1080x2400 iOS 16.7.16 SpringBoard Lock Screen rendering via AppleCLCD + IOSurface swaps and CRC32-verified (57555153) live USB screenshot capture.",
+    "Replaced upstream 1125x2436->1080x2400 center-crop (top=33, bot=12, dock_L=8, dock_R=7) and direct volatile WC writes with L1-buffered bilinear scaling + memcpy bursts, eliminating edge clipping (top=50, bot=23..29, dock_L=28, dock_R=28) and sustained-animation WC disconnects.",
+    "Device-verified 1080x2400 iOS 16.7.16 UI across Lock Screen, Home Screen, Settings (initial and scrolled), App Library, and Control Center via CRC32-verified live USB screenshot capture.",
 ]
 completion = [
     "A known frame appears with correct geometry and colors, then userland presentation and display power controls work.",
@@ -215,7 +217,7 @@ next_action = [
 ]
 evidence = [
     { kind = "source", reference = "dts/pclm10.dts", result = "Documents framebuffer0@9d000000 (1080x2400, stride 4320) and cont_splash_region@9d000000." },
-    { kind = "device", reference = "scripts/screenshot-xnu-usb.py", result = "Captured CRC32-verified (57555153) 1080x2400 PNG screenshot of live iOS 16.7.16 SpringBoard Lock Screen from 34d5cb55.", command = "python3 scripts/screenshot-xnu-usb.py --socket sweet_work/usb_captures/ios_20H392_m4_shot/usb-control.sock --output sweet_work/usb_captures/ios_20H392_m4_shot/screen.png --timeout 90", revision = "f437b9a8a811c9b3edf99f097e34e1ef4e76b9e6" },
+    { kind = "device", reference = "scripts/screenshot-xnu-usb.py", result = "Captured CRC32-verified 1080x2400 PNGs across Lock Screen (e32d2895), Home Screen (3fad9be9), Settings (c5378c71), scrolled Settings (8eeca332), and App Library (732b19ef) with unclipped margins on 34d5cb55.", command = "python3 sweet_work/auto_qud_multishot.py --boot-img sweet_work/out_ios_20H392_rowbuf/boot-sweet.img --capture-dir sweet_work/usb_captures/ios_20H392_rowbuf --capture-seconds 280", revision = "094c73534157a8e09bd111ffbbd91250cd5ad114" },
 ]
 
 [[area]]
@@ -230,14 +232,14 @@ inputs = [
 ]
 configuration = [
     "scripts/apply-pclm10-sweet-overlay.py configures sweet_touch.c for SM8150 TLMM SOUTH GPIO 55/56 software I2C bitbang fallback when SE17 GENI_IF_DISABLE_RO (0x64=0x1) indicates TZ-locked GPI mode.",
-    "RMI4 S3706A F12_DATA_BASE (d1_off=0) + DATA15 obj_attention + F01 wake/IRQ init publish multi-touch events via SweetHIDTouch; sweet_keys.c publishes PON/GPIO buttons via SweetHIDButtons.",
+    "RMI4 S3706A F12_DATA_BASE (d1_off=0) + DATA15 obj_attention + F01 wake/IRQ init publish multi-touch events via SweetHIDTouch (aligned 1:1 to 1080x2400 scaled display with fOffX=0, fOffY=0); sweet_keys.c publishes PON/GPIO buttons via SweetHIDButtons.",
 ]
 procedure = [
-    "Boot with sweettouch=1 sweettouchdelay=3 sweetkeys=1 and verify S3706A probe (0x20), SpringBoard swipe coordinates, and physical key HID delivery.",
+    "Boot with sweettouch=1 sweettouchdelay=3 sweetkeys=1 and verify S3706A probe (0x20), SpringBoard swipe/tap coordinates, and physical key HID delivery.",
 ]
 findings = [
     "TrustZone locks QUPv3 SE17 to GPI DMA mode (GENI_IF_DISABLE_RO 0x64=0x1) and GCC wrap2 s_ahb_clk (0x1e008) is HWCG-gated; software I2C bitbang on TLMM SOUTH GPIO 55/56 after PM8150L GPIO5 high enables reliable 10ms multi-touch polling.",
-    "OPPO S3706A F12 stores finger slots directly at F12_2D_DATA_BASE (d1_off=0) and obj_attention at f12_d+3, verified with real finger swipes on hardware.",
+    "OPPO S3706A F12 stores finger slots directly at F12_2D_DATA_BASE (d1_off=0) and obj_attention at f12_d+3, verified with real finger swipes and 1:1 scaled UI unlock/Settings/App Library navigation on hardware.",
 ]
 completion = [
     "Touches map to the display, simultaneous contacts keep stable IDs, release events arrive, and buttons produce expected HID reports.",
@@ -250,7 +252,7 @@ next_action = [
 ]
 evidence = [
     { kind = "source", reference = "dts/pclm10.dts", result = "Documents qupv3_se17_i2c (0x00c80000) and touchscreen@20 (synaptics,s3706)." },
-    { kind = "device", reference = "scripts/apply-pclm10-sweet-overlay.py", result = "Verified S3706A probe (pid=S3706A f01=0x6 f12=0x8 d1_off=0 n=10), live touch down/up coordinates, and PM8150 keys on 34d5cb55.", command = "python3 sweet_work/auto_qud_shot.py --serial 34d5cb55 --qud-serial QcomXnuUsbDebug --boot-img sweet_work/out_ios_20H392_m4_shot/boot-sweet.img --capture-dir sweet_work/usb_captures/ios_20H392_m4_shot", revision = "f437b9a8a811c9b3edf99f097e34e1ef4e76b9e6" },
+    { kind = "device", reference = "scripts/apply-pclm10-sweet-overlay.py", result = "Verified S3706A probe (pid=S3706A f01=0x6 f12=0x8 d1_off=0 n=10), 1:1 scaled UI touch navigation (Lock->Home->Settings->Scroll->App Library), and PM8150 keys on 34d5cb55.", command = "python3 sweet_work/auto_qud_multishot.py --boot-img sweet_work/out_ios_20H392_rowbuf/boot-sweet.img --capture-dir sweet_work/usb_captures/ios_20H392_rowbuf --capture-seconds 280", revision = "094c73534157a8e09bd111ffbbd91250cd5ad114" },
 ]
 
 [[area]]
