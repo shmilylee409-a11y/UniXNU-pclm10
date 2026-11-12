@@ -213,7 +213,7 @@ limits = [
     "DCS backlight brightness slider and native DPU TE (GPIO 8) refresh modulation are not wired yet; display off fades AMOLED pixels to black.",
 ]
 next_action = [
-    "Optionally expose DCS backlight level over DSI0 command mode if brightness control beyond AMOLED fade is desired.",
+    "Verify staged SweetBacklight (DISP_CC/DSI0 TPG FIFO DCS 0x51 brightness), AW8697 LRA haptic (qupv3_se7_i2c 0x5a), and BQ27541 initial SCL bus-recovery on 34d5cb55 once reconnected to fastboot.",
 ]
 evidence = [
     { kind = "source", reference = "dts/pclm10.dts", result = "Documents framebuffer0@9d000000 (1080x2400, stride 4320) and cont_splash_region@9d000000." },
