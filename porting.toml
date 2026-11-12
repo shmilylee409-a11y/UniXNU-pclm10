@@ -371,6 +371,7 @@ procedure = [
 findings = [
     "dtbo.img fragment@65 confirmed BQ27541 @ 0x55 is wired to qupv3_se15_i2c (TLMM EAST 0x03500000 GPIO 27/28), not qupv3_se1_i2c (GPIO 114/115).",
     "Device-verified dual-cell BQ27541 readout (raw 8633 mV -> 4316 mV/cell, SOC 100%, 0 mA) and PM8150B SID 2 SMB5 telemetry (usb=0x10, path=0x95, chg=0x47), reflected by the live Lock Screen charging indicator.",
+    "Device-verified BQ27541 bq_recover() 9-clock SCL recovery yielding mv_ok=1(8623) soc_ok=1(100) on poll 0 and AW8697 LRA haptic probe (err=0 id=0x97) + BY_DRV_TIME boot tap (glb=0->0) on 34d5cb55.",
 ]
 completion = [
     "Declared power controls and battery readings match observations; RPMh rail voting completes cleanly.",
@@ -379,7 +380,7 @@ limits = [
     "Sleep/resume S2R and 65W SuperVOOC protocol negotiation with STM8S (0x26) remain unimplemented; I2C bitbang uses polled GPIO 27/28.",
 ]
 next_action = [
-    "Optionally add an initial I2C bus recovery/retry on poll 0 of BQ27541 so mv_ok=1 on the very first sample every boot.",
+    "Optional: expose AW8697 IOKit haptic trigger service once CoreBrightness display backlight verification completes.",
 ]
 evidence = [
     { kind = "source", reference = "dts/pclm10.dts", result = "Reserves AOP Command DB at 0x85f20000 and RPMh RSC at 0x18220000." },
@@ -405,7 +406,7 @@ procedure = [
 findings = [
     "Switching sweet-16k.yml xnu job to macos-15-intel resolves arm64 runner capacity stalls (~12-13 min kernel build).",
     "Raising PANIC_LOG_BASE to 0x17E000000 in scripts/mkadt-sweet-pclm10.py clears DDR Bank 1+2 for 2816 MiB XNU DRAM without overlapping PStore.",
-    "scripts/apply-pclm10-sweet-overlay.py adds AppleARMBacklight (DISP_CC/DSI0 TPG FIFO DCS 0x51), AW8697 LRA haptic probe/tap (BY_DRV_TIME + explicit GO=0/GLB_STATE standby stop), and BQ27541 SCL bus recovery.",
+    "scripts/apply-pclm10-sweet-overlay.py populates all 9 mandatory iOS 16 CoreBrightness backlight-calibration-parameters keys (including current-for-max/mid-backlight and hardware-max-current-limit) alongside AW8697 stop fix and BQ27541 SCL recovery.",
 ]
 completion = [
     "Kernel and boot-sweet.img build cleanly, fit the 100 MiB Android boot partition, and boot on PCLM10 hardware.",
