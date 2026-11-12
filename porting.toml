@@ -405,6 +405,7 @@ procedure = [
 findings = [
     "Switching sweet-16k.yml xnu job to macos-15-intel resolves arm64 runner capacity stalls (~12-13 min kernel build).",
     "Raising PANIC_LOG_BASE to 0x17E000000 in scripts/mkadt-sweet-pclm10.py clears DDR Bank 1+2 for 2816 MiB XNU DRAM without overlapping PStore.",
+    "scripts/apply-pclm10-sweet-overlay.py adds SweetBacklight (DISP_CC/DSI0 TPG FIFO DCS 0x51), AW8697 LRA haptic probe/tap, and BQ27541 SCL bus recovery, and cleanly builds into final interactive boot-sweet.img.",
 ]
 completion = [
     "Kernel and boot-sweet.img build cleanly, fit the 100 MiB Android boot partition, and boot on PCLM10 hardware.",
