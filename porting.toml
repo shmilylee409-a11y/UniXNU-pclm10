@@ -213,7 +213,7 @@ limits = [
     "DCS backlight brightness slider and native DPU TE (GPIO 8) refresh modulation are not wired yet; display off fades AMOLED pixels to black.",
 ]
 next_action = [
-    "Verify staged SweetBacklight (DISP_CC/DSI0 TPG FIFO DCS 0x51 brightness), AW8697 LRA haptic (qupv3_se7_i2c 0x5a), and BQ27541 initial SCL bus-recovery on 34d5cb55 once reconnected to fastboot.",
+    "Verify AppleARMBacklight (DISP_CC/DSI0 TPG FIFO DCS 0x51 brightness + libEDR conformance) and fixed AW8697 stop sequence on 34d5cb55.",
 ]
 evidence = [
     { kind = "source", reference = "dts/pclm10.dts", result = "Documents framebuffer0@9d000000 (1080x2400, stride 4320) and cont_splash_region@9d000000." },
@@ -405,7 +405,7 @@ procedure = [
 findings = [
     "Switching sweet-16k.yml xnu job to macos-15-intel resolves arm64 runner capacity stalls (~12-13 min kernel build).",
     "Raising PANIC_LOG_BASE to 0x17E000000 in scripts/mkadt-sweet-pclm10.py clears DDR Bank 1+2 for 2816 MiB XNU DRAM without overlapping PStore.",
-    "scripts/apply-pclm10-sweet-overlay.py adds SweetBacklight (DISP_CC/DSI0 TPG FIFO DCS 0x51), AW8697 LRA haptic probe/tap, and BQ27541 SCL bus recovery, and cleanly builds into final interactive boot-sweet.img.",
+    "scripts/apply-pclm10-sweet-overlay.py adds AppleARMBacklight (DISP_CC/DSI0 TPG FIFO DCS 0x51), AW8697 LRA haptic probe/tap (BY_DRV_TIME + explicit GO=0/GLB_STATE standby stop), and BQ27541 SCL bus recovery.",
 ]
 completion = [
     "Kernel and boot-sweet.img build cleanly, fit the 100 MiB Android boot partition, and boot on PCLM10 hardware.",
